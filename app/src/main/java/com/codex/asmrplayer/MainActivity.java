@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
+import android.database.ContentObserver;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -33,6 +34,7 @@ import android.widget.BaseAdapter;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -79,6 +81,8 @@ public class MainActivity extends Activity {
     private static final String ICON_LYRICS = "☰";
     private static final String PREFS = "asmr_pocket_prefs";
     private static final String KEY_TREE_URI = "tree_uri";
+    private static final String KEY_TREE_URIS = "tree_uris";
+    private static final long RESCAN_DEBOUNCE_MS = 1200;
     private static final String KEY_LIBRARY_CACHE = "library_cache";
     private static final String KEY_FLOATING_LYRICS = "floating_lyrics";
     private static final String KEY_WEB_HISTORY = "web_history";
@@ -126,6 +130,12 @@ public class MainActivity extends Activity {
     private int currentTab = TAB_MY;
     private int pageMode = PAGE_WORKS;
 
+    private final List<RootInfo> roots = new ArrayList<>();
+    private int filterRootIndex = -1;
+    private final ExecutorService scanExecutor = Executors.newSingleThreadExecutor();
+    private final Runnable pendingRescan = () -> rescanLibrary(true);
+    private ContentObserver libraryObserver;
+
     private FrameLayout rootLayout;
     private View drawerScrim;
     private LinearLayout settingsDrawer;
@@ -165,6 +175,9 @@ public class MainActivity extends Activity {
     private TextView miniTimeView;
     private SeekBar miniSeekBar;
     private Button miniPlayButton;
+    private HorizontalScrollView filterBar;
+    private LinearLayout filterChipRow;
+    private LinearLayout rootListContainer;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -182,11 +195,13 @@ public class MainActivity extends Activity {
             showFloatingLyrics();
         }
 
-        String saved = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_TREE_URI, null);
-        if (!TextUtils.isEmpty(saved) && !loadCachedLibrary()) {
-            folderView.setText(saved);
+        loadRoots();
+        registerLibraryObserver();
+        refreshFilterBar();
+        if (!roots.isEmpty() && !loadCachedLibrary()) {
+            folderView.setText(rootNamesText());
             titleView.setText("已保存文件夹授权");
-            lyricView.setText("请点击选择文件夹重新扫描一次，之后会使用缓存快速进入");
+            lyricView.setText("请点击“重新扫描”刷新作品列表，之后会使用缓存快速进入");
             sectionSubtitleView.setText("未找到预加载缓存");
         }
     }
@@ -195,9 +210,11 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         super.onDestroy();
         handler.removeCallbacks(progressTick);
+        unregisterLibraryObserver();
         hideFloatingLyrics();
         releasePlayer();
         imageExecutor.shutdownNow();
+        scanExecutor.shutdownNow();
     }
 
     @Override
@@ -401,6 +418,17 @@ public class MainActivity extends Activity {
         statusView = label("未加载", 12, Color.rgb(184, 193, 202));
         statusView.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
         meta.addView(statusView, new LinearLayout.LayoutParams(0, -1, 1));
+
+        filterBar = new HorizontalScrollView(this);
+        filterBar.setHorizontalScrollBarEnabled(false);
+        filterBar.setBackgroundColor(Color.rgb(235, 226, 214));
+        filterBar.setVisibility(View.GONE);
+        filterChipRow = new LinearLayout(this);
+        filterChipRow.setOrientation(LinearLayout.HORIZONTAL);
+        filterChipRow.setGravity(Gravity.CENTER_VERTICAL);
+        filterChipRow.setPadding(dp(6), dp(3), dp(6), dp(3));
+        filterBar.addView(filterChipRow, new HorizontalScrollView.LayoutParams(-2, -2));
+        contentPanel.addView(filterBar, new LinearLayout.LayoutParams(-1, dp(40)));
 
         browserList = new ListView(this);
         browserList.setDivider(new ColorDrawable(Color.TRANSPARENT));
@@ -615,9 +643,35 @@ public class MainActivity extends Activity {
         area.setOrientation(LinearLayout.VERTICAL);
         area.setPadding(0, dp(18), 0, dp(12));
 
-        Button chooseFolder = drawerButton("选择文件");
-        chooseFolder.setOnClickListener(v -> openFolderPicker());
-        area.addView(chooseFolder, new LinearLayout.LayoutParams(-1, dp(50)));
+        Button addFolder = drawerButton("添加文件夹路径");
+        addFolder.setOnClickListener(v -> openFolderPicker());
+        area.addView(addFolder, new LinearLayout.LayoutParams(-1, dp(50)));
+
+        Button rescanButton = drawerButton("重新扫描");
+        rescanButton.setOnClickListener(v -> {
+            if (roots.isEmpty()) {
+                Toast.makeText(this, "请先添加文件夹路径", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            Toast.makeText(this, "开始重新扫描", Toast.LENGTH_SHORT).show();
+            rescanLibrary(false);
+        });
+        LinearLayout.LayoutParams rescanParams = new LinearLayout.LayoutParams(-1, dp(50));
+        rescanParams.topMargin = dp(10);
+        area.addView(rescanButton, rescanParams);
+
+        TextView folderHint = label("支持添加多个文件夹路径，目录内容变化时会自动刷新作品列表。", 13, Color.rgb(160, 169, 178));
+        folderHint.setMaxLines(3);
+        LinearLayout.LayoutParams folderHintParams = new LinearLayout.LayoutParams(-1, -2);
+        folderHintParams.topMargin = dp(8);
+        area.addView(folderHint, folderHintParams);
+
+        rootListContainer = new LinearLayout(this);
+        rootListContainer.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams rootListParams = new LinearLayout.LayoutParams(-1, -2);
+        rootListParams.topMargin = dp(10);
+        area.addView(rootListContainer, rootListParams);
+        refreshRootRows();
 
         floatingLyricsButton = drawerButton("台词悬浮");
         floatingLyricsButton.setOnClickListener(v -> toggleFloatingLyrics());
@@ -690,7 +744,7 @@ public class MainActivity extends Activity {
         title.setGravity(Gravity.CENTER_VERTICAL);
         settingsDrawer.addView(title, new LinearLayout.LayoutParams(-1, dp(44)));
 
-        Button chooseFolder = drawerButton("选择文件");
+        Button chooseFolder = drawerButton("添加文件夹路径");
         chooseFolder.setOnClickListener(v -> {
             hideSettingsDrawer();
             openFolderPicker();
@@ -1120,14 +1174,278 @@ public class MainActivity extends Activity {
                 return;
             }
             getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_TREE_URI, uri.toString()).apply();
-            scanFolder(uri, new ArrayList<>(works));
+            addRoot(uri);
         }
     }
 
-    private void scanFolder(Uri treeUri, List<WorkItem> cachedOrder) {
-        currentTab = TAB_MY;
-        boolean keepPlayback = currentPlaybackItem() != null;
+    private void addRoot(Uri uri) {
+        String uriString = uri.toString();
+        for (RootInfo root : roots) {
+            if (root.uri.equals(uriString)) {
+                Toast.makeText(this, "该文件夹已在路径列表中", Toast.LENGTH_SHORT).show();
+                return;
+            }
+        }
+        roots.add(new RootInfo(uriString, displayNameFromTreeId(DocumentsContract.getTreeDocumentId(uri))));
+        saveRoots();
+        registerLibraryObserver();
+        refreshRootRows();
+        refreshFilterBar();
+        rescanLibrary(false);
+    }
+
+    private void removeRoot(int index) {
+        if (index < 0 || index >= roots.size()) {
+            return;
+        }
+        RootInfo root = roots.remove(index);
+        try {
+            getContentResolver().releasePersistableUriPermission(
+                    Uri.parse(root.uri), Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } catch (Exception ignored) {
+        }
+        if (filterRootIndex >= roots.size()) {
+            filterRootIndex = -1;
+        }
+        saveRoots();
+        registerLibraryObserver();
+        refreshRootRows();
+        refreshFilterBar();
+        rescanLibrary(false);
+        Toast.makeText(this, "已移除 " + root.name, Toast.LENGTH_SHORT).show();
+    }
+
+    private void loadRoots() {
+        roots.clear();
+        String raw = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_TREE_URIS, null);
+        if (TextUtils.isEmpty(raw)) {
+            String legacy = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_TREE_URI, null);
+            if (!TextUtils.isEmpty(legacy)) {
+                try {
+                    roots.add(new RootInfo(legacy,
+                            displayNameFromTreeId(DocumentsContract.getTreeDocumentId(Uri.parse(legacy)))));
+                } catch (Exception ignored) {
+                }
+            }
+            return;
+        }
+        try {
+            JSONArray array = new JSONArray(raw);
+            for (int i = 0; i < array.length(); i++) {
+                String uriString = array.optString(i, "");
+                if (TextUtils.isEmpty(uriString)) {
+                    continue;
+                }
+                try {
+                    roots.add(new RootInfo(uriString,
+                            displayNameFromTreeId(DocumentsContract.getTreeDocumentId(Uri.parse(uriString)))));
+                } catch (Exception ignored) {
+                }
+            }
+        } catch (JSONException ignored) {
+        }
+    }
+
+    private void saveRoots() {
+        JSONArray array = new JSONArray();
+        for (RootInfo root : roots) {
+            array.put(root.uri);
+        }
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_TREE_URIS, array.toString()).apply();
+    }
+
+    private void refreshRootRows() {
+        if (rootListContainer == null) {
+            return;
+        }
+        rootListContainer.removeAllViews();
+        if (roots.isEmpty()) {
+            TextView empty = label("尚未添加文件夹路径", 13, Color.rgb(160, 169, 178));
+            rootListContainer.addView(empty, new LinearLayout.LayoutParams(-1, dp(34)));
+            return;
+        }
+        for (int i = 0; i < roots.size(); i++) {
+            final int index = i;
+            RootInfo root = roots.get(i);
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setBackgroundResource(R.drawable.list_card);
+            TextView name = label(root.name, 14, Color.rgb(24, 28, 40));
+            name.setSingleLine(true);
+            name.setEllipsize(TextUtils.TruncateAt.END);
+            name.setPadding(dp(10), 0, dp(6), 0);
+            row.addView(name, new LinearLayout.LayoutParams(0, -1, 1));
+            Button remove = drawerButton("移除");
+            remove.setTextSize(12);
+            remove.setPadding(dp(6), 0, dp(6), 0);
+            remove.setOnClickListener(v -> removeRoot(index));
+            row.addView(remove, new LinearLayout.LayoutParams(dp(72), dp(38)));
+            LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(-1, dp(50));
+            if (i > 0) {
+                rowParams.topMargin = dp(6);
+            }
+            rootListContainer.addView(row, rowParams);
+        }
+    }
+
+    private void registerLibraryObserver() {
+        unregisterLibraryObserver();
+        if (roots.isEmpty()) {
+            return;
+        }
+        libraryObserver = new ContentObserver(handler) {
+            @Override
+            public void onChange(boolean selfChange, Uri uri) {
+                handler.removeCallbacks(pendingRescan);
+                handler.postDelayed(pendingRescan, RESCAN_DEBOUNCE_MS);
+            }
+        };
+        for (RootInfo root : roots) {
+            try {
+                Uri treeUri = Uri.parse(root.uri);
+                String treeDocumentId = DocumentsContract.getTreeDocumentId(treeUri);
+                Uri childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, treeDocumentId);
+                getContentResolver().registerContentObserver(childrenUri, true, libraryObserver);
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private void unregisterLibraryObserver() {
+        if (libraryObserver != null) {
+            try {
+                getContentResolver().unregisterContentObserver(libraryObserver);
+            } catch (Exception ignored) {
+            }
+            libraryObserver = null;
+        }
+        handler.removeCallbacks(pendingRescan);
+    }
+
+    private List<WorkItem> visibleWorks() {
+        if (filterRootIndex < 0 || filterRootIndex >= roots.size()) {
+            return works;
+        }
+        String rootUri = roots.get(filterRootIndex).uri;
+        List<WorkItem> result = new ArrayList<>();
+        for (WorkItem work : works) {
+            if (rootUri.equals(work.rootUri)) {
+                result.add(work);
+            }
+        }
+        return result;
+    }
+
+    private void setFilter(int index) {
+        filterRootIndex = index;
+        updateFilterChips();
+        browserAdapter.notifyDataSetChanged();
+        int shown = visibleWorks().size();
+        sectionSubtitleView.setText(filterRootIndex >= 0
+                ? shown + " 个作品 · 筛选: " + roots.get(filterRootIndex).name
+                : works.size() + " 个作品");
+    }
+
+    private void refreshFilterBar() {
+        if (filterChipRow == null) {
+            return;
+        }
+        filterChipRow.removeAllViews();
+        if (roots.size() <= 1) {
+            filterBar.setVisibility(View.GONE);
+            return;
+        }
+        filterBar.setVisibility(View.VISIBLE);
+        addFilterChip("全部", -1);
+        for (int i = 0; i < roots.size(); i++) {
+            addFilterChip(roots.get(i).name, i);
+        }
+        updateFilterChips();
+    }
+
+    private void addFilterChip(String text, final int index) {
+        Button chip = new Button(this);
+        chip.setText(text);
+        chip.setTextSize(13);
+        chip.setAllCaps(false);
+        chip.setMinWidth(0);
+        chip.setMinimumWidth(0);
+        chip.setSingleLine(true);
+        chip.setPadding(dp(14), 0, dp(14), 0);
+        chip.setBackgroundResource(R.drawable.mini_pill);
+        chip.setOnClickListener(v -> setFilter(index));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, dp(32));
+        if (filterChipRow.getChildCount() > 0) {
+            params.leftMargin = dp(6);
+        }
+        filterChipRow.addView(chip, params);
+    }
+
+    private void updateFilterChips() {
+        if (filterChipRow == null) {
+            return;
+        }
+        for (int i = 0; i < filterChipRow.getChildCount(); i++) {
+            Button chip = (Button) filterChipRow.getChildAt(i);
+            boolean active = (i == 0 && filterRootIndex < 0) || (i > 0 && filterRootIndex == i - 1);
+            chip.setTextColor(active ? Color.rgb(18, 24, 38) : Color.rgb(124, 132, 144));
+            chip.setTextSize(active ? 14 : 13);
+        }
+    }
+
+    private String rootNamesText() {
+        StringBuilder builder = new StringBuilder();
+        for (RootInfo root : roots) {
+            if (builder.length() > 0) {
+                builder.append("、");
+            }
+            builder.append(root.name);
+        }
+        return builder.length() == 0 ? "未选择文件夹" : builder.toString();
+    }
+
+    private void rescanLibrary(boolean auto) {
+        if (roots.isEmpty()) {
+            if (!auto) {
+                Toast.makeText(this, "请先添加文件夹路径", Toast.LENGTH_SHORT).show();
+            }
+            return;
+        }
+        final boolean keepPlayback = currentPlaybackItem() != null;
+        final List<RootInfo> rootsSnapshot = new ArrayList<>(roots);
+        final List<WorkItem> cachedOrder = new ArrayList<>(works);
+        if (!auto) {
+            statusView.setText("扫描中...");
+        }
+        scanExecutor.execute(() -> {
+            List<WorkItem> scanned = new ArrayList<>();
+            Collator collator = Collator.getInstance(Locale.CHINA);
+            for (RootInfo root : rootsSnapshot) {
+                try {
+                    Uri treeUri = Uri.parse(root.uri);
+                    String treeDocumentId = DocumentsContract.getTreeDocumentId(treeUri);
+                    List<FileDoc> files = listTreeFilesRecursive(treeUri, treeDocumentId);
+                    List<WorkBuilder> builders = buildWorks(files, root.name, root.name + "::");
+                    Collections.sort(builders, (left, right) -> collator.compare(left.name, right.name));
+                    for (WorkBuilder builder : builders) {
+                        WorkItem work = builder.toWork(collator);
+                        work.rootUri = root.uri;
+                        if (!work.tracks.isEmpty()) {
+                            scanned.add(work);
+                        }
+                    }
+                } catch (Exception ex) {
+                    handler.post(() -> Toast.makeText(MainActivity.this,
+                            "扫描 " + root.name + " 失败: " + ex.getMessage(), Toast.LENGTH_LONG).show());
+                }
+            }
+            List<WorkItem> merged = mergeWorks(scanned, cachedOrder);
+            handler.post(() -> applyScanResults(merged, auto, keepPlayback));
+        });
+    }
+
+    private void applyScanResults(List<WorkItem> merged, boolean auto, boolean keepPlayback) {
         works.clear();
         if (!keepPlayback) {
             playlist.clear();
@@ -1136,49 +1454,35 @@ public class MainActivity extends Activity {
             activeWork = null;
             playbackWork = null;
             currentIndex = -1;
+            releasePlayer();
+            resetPlaybackUi();
         }
         movingWorkIndex = -1;
         movingTrackIndex = -1;
         draggingListItem = false;
-        if (!keepPlayback) {
-            releasePlayer();
-            resetPlaybackUi();
-        }
-        updateMiniPlayer();
-
-        String treeDocumentId = DocumentsContract.getTreeDocumentId(treeUri);
-        String selectedName = displayNameFromTreeId(treeDocumentId);
-        List<FileDoc> files = listTreeFilesRecursive(treeUri, treeDocumentId);
-        List<WorkBuilder> builders = buildWorks(files, selectedName);
-
-        final Collator collator = Collator.getInstance(Locale.CHINA);
-        Collections.sort(builders, (left, right) -> collator.compare(left.name, right.name));
-        List<WorkItem> scannedWorks = new ArrayList<>();
-        for (WorkBuilder builder : builders) {
-            WorkItem work = builder.toWork(collator);
-            if (!work.tracks.isEmpty()) {
-                scannedWorks.add(work);
-            }
-        }
-        works.addAll(mergeWorks(scannedWorks, cachedOrder));
+        works.addAll(merged);
         saveLibraryCache();
-
-        pageMode = PAGE_WORKS;
         browserAdapter.notifyDataSetChanged();
-        updatePageChrome(false);
-        folderView.setText(treeUri.toString());
-        statusView.setText(works.size() + " 个作品");
+        updateMiniPlayer();
+        folderView.setText(rootNamesText());
+        if (!auto) {
+            currentTab = TAB_MY;
+            pageMode = PAGE_WORKS;
+            updatePageChrome(false);
+        }
         if (works.isEmpty()) {
             sectionTitleView.setText("作品列表");
             sectionSubtitleView.setText("没有识别到可播放作品");
             titleView.setText("没有识别到 ASMR 音频作品");
-            lyricView.setText("请选择包含 RJ 文件夹或音频文件的目录");
+            lyricView.setText("请确认所选目录内包含 RJ 作品文件夹或音频文件");
+            statusView.setText(auto ? "目录已无作品" : works.size() + " 个作品");
         } else {
             sectionTitleView.setText("作品列表");
             sectionSubtitleView.setText("已识别 " + works.size() + " 个作品");
             titleView.setText("已识别 " + works.size() + " 个作品");
             lyricView.setText("点击作品查看音轨并播放");
-            showWorkPreview(works.get(0));
+            showWorkPreview(visibleWorks().get(0));
+            statusView.setText(auto ? "检测到文件变化，已自动刷新" : works.size() + " 个作品");
         }
     }
 
@@ -1269,8 +1573,7 @@ public class MainActivity extends Activity {
             pageMode = PAGE_WORKS;
             browserAdapter.notifyDataSetChanged();
             updatePageChrome(false);
-            String tree = root.optString("treeUri", getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_TREE_URI, ""));
-            folderView.setText(tree);
+            folderView.setText(rootNamesText());
             statusView.setText("已加载缓存");
             if (works.isEmpty()) {
                 sectionTitleView.setText("作品列表");
@@ -1295,6 +1598,11 @@ public class MainActivity extends Activity {
         try {
             JSONObject root = new JSONObject();
             root.put("treeUri", getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_TREE_URI, ""));
+            JSONArray rootUris = new JSONArray();
+            for (RootInfo rootInfo : roots) {
+                rootUris.put(rootInfo.uri);
+            }
+            root.put("treeUris", rootUris);
             JSONArray array = new JSONArray();
             for (WorkItem work : works) {
                 array.put(workToJson(work));
@@ -1311,6 +1619,7 @@ public class MainActivity extends Activity {
         JSONObject object = new JSONObject();
         object.put("key", work.key);
         object.put("name", work.name);
+        object.put("rootUri", work.rootUri == null ? "" : work.rootUri);
         object.put("cover", fileToJson(work.cover));
         JSONArray tracks = new JSONArray();
         for (MediaItem item : work.tracks) {
@@ -1334,7 +1643,9 @@ public class MainActivity extends Activity {
                 }
             }
         }
-        return new WorkItem(key, name, cover, tracks);
+        WorkItem work = new WorkItem(key, name, cover, tracks);
+        work.rootUri = object.optString("rootUri", "");
+        return work;
     }
 
     private JSONObject mediaToJson(MediaItem item) throws JSONException {
@@ -1398,7 +1709,7 @@ public class MainActivity extends Activity {
         );
     }
 
-    private List<WorkBuilder> buildWorks(List<FileDoc> files, String selectedName) {
+    private List<WorkBuilder> buildWorks(List<FileDoc> files, String selectedName, String keyPrefix) {
         Map<String, WorkBuilder> map = new LinkedHashMap<>();
         boolean selectedLooksLikeWork = looksLikeWorkName(selectedName);
 
@@ -1407,11 +1718,12 @@ public class MainActivity extends Activity {
                 continue;
             }
             String key = selectedLooksLikeWork ? selectedName : firstPathSegment(file.relativePath);
+            String fullKey = keyPrefix + key;
             String name = selectedLooksLikeWork || TextUtils.isEmpty(key) ? selectedName : key;
-            WorkBuilder builder = map.get(key);
+            WorkBuilder builder = map.get(fullKey);
             if (builder == null) {
-                builder = new WorkBuilder(key, name);
-                map.put(key, builder);
+                builder = new WorkBuilder(fullKey, name);
+                map.put(fullKey, builder);
             }
             builder.add(file);
         }
@@ -1480,14 +1792,18 @@ public class MainActivity extends Activity {
             return;
         }
         if (pageMode == PAGE_WORKS) {
-            openWork(works.get(position));
+            openWork(visibleWorks().get(position));
         } else if (pageMode == PAGE_TRACKS) {
             playAt(position, true);
         }
     }
 
     private boolean onListItemLongClick(int position) {
-        if (pageMode == PAGE_WORKS && position >= 0 && position < works.size()) {
+        if (pageMode == PAGE_WORKS && position >= 0 && position < visibleWorks().size()) {
+            if (filterRootIndex >= 0) {
+                Toast.makeText(this, "筛选状态下不能拖动排序，请先选“全部”", Toast.LENGTH_SHORT).show();
+                return true;
+            }
             movingWorkIndex = position;
             movingTrackIndex = -1;
             draggingListItem = true;
@@ -1791,6 +2107,7 @@ public class MainActivity extends Activity {
         backButton.setVisibility(myTab && pageMode != PAGE_WORKS ? View.VISIBLE : View.GONE);
         playerArea.setVisibility(playerVisible ? View.VISIBLE : View.GONE);
         browserList.setVisibility(listVisible ? View.VISIBLE : View.GONE);
+        filterBar.setVisibility(listVisible && pageMode == PAGE_WORKS && roots.size() > 1 ? View.VISIBLE : View.GONE);
         lyricsList.setVisibility(lyricsVisible ? View.VISIBLE : View.GONE);
         recentList.setVisibility(currentTab == TAB_HEARD ? View.VISIBLE : View.GONE);
         settingsArea.setVisibility(currentTab == TAB_SETTINGS ? View.VISIBLE : View.GONE);
@@ -2314,12 +2631,12 @@ public class MainActivity extends Activity {
     private class BrowserAdapter extends BaseAdapter {
         @Override
         public int getCount() {
-            return pageMode == PAGE_WORKS ? works.size() : playlist.size();
+            return pageMode == PAGE_WORKS ? visibleWorks().size() : playlist.size();
         }
 
         @Override
         public Object getItem(int position) {
-            return pageMode == PAGE_WORKS ? works.get(position) : playlist.get(position);
+            return pageMode == PAGE_WORKS ? visibleWorks().get(position) : playlist.get(position);
         }
 
         @Override
@@ -2330,7 +2647,7 @@ public class MainActivity extends Activity {
         @Override
         public View getView(int position, View convertView, ViewGroup parent) {
             if (pageMode == PAGE_WORKS) {
-                return workRow(works.get(position), position, convertView);
+                return workRow(visibleWorks().get(position), position, convertView);
             }
             return trackRow(playlist.get(position), position, convertView);
         }
@@ -2679,12 +2996,23 @@ public class MainActivity extends Activity {
         final String name;
         final FileDoc cover;
         final List<MediaItem> tracks;
+        String rootUri;
 
         WorkItem(String key, String name, FileDoc cover, List<MediaItem> tracks) {
             this.key = TextUtils.isEmpty(key) ? name : key;
             this.name = name;
             this.cover = cover;
             this.tracks = tracks;
+        }
+    }
+
+    private static class RootInfo {
+        final String uri;
+        final String name;
+
+        RootInfo(String uri, String name) {
+            this.uri = uri;
+            this.name = name;
         }
     }
 

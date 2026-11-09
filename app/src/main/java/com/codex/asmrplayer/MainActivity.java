@@ -59,6 +59,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -83,6 +84,7 @@ public class MainActivity extends Activity {
     private static final String KEY_TREE_URI = "tree_uri";
     private static final String KEY_TREE_URIS = "tree_uris";
     private static final long RESCAN_DEBOUNCE_MS = 1200;
+    private static final long POLL_INTERVAL_MS = 6000;
     private static final String KEY_LIBRARY_CACHE = "library_cache";
     private static final String KEY_FLOATING_LYRICS = "floating_lyrics";
     private static final String KEY_WEB_HISTORY = "web_history";
@@ -133,8 +135,11 @@ public class MainActivity extends Activity {
     private final List<RootInfo> roots = new ArrayList<>();
     private int filterRootIndex = -1;
     private final ExecutorService scanExecutor = Executors.newSingleThreadExecutor();
+    private final AtomicBoolean scanInFlight = new AtomicBoolean(false);
     private final Runnable pendingRescan = () -> rescanLibrary(true);
+    private Runnable pollTick;
     private ContentObserver libraryObserver;
+    private boolean activityResumed;
 
     private FrameLayout rootLayout;
     private View drawerScrim;
@@ -198,6 +203,12 @@ public class MainActivity extends Activity {
         loadRoots();
         registerLibraryObserver();
         refreshFilterBar();
+        pollTick = () -> {
+            if (activityResumed && !roots.isEmpty()) {
+                rescanLibrary(true);
+            }
+            handler.postDelayed(pollTick, POLL_INTERVAL_MS);
+        };
         if (!roots.isEmpty() && !loadCachedLibrary()) {
             folderView.setText(rootNamesText());
             titleView.setText("已保存文件夹授权");
@@ -220,7 +231,13 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        activityResumed = true;
         hideSystemBars();
+        if (!roots.isEmpty()) {
+            rescanLibrary(true);
+        }
+        handler.removeCallbacks(pollTick);
+        handler.postDelayed(pollTick, POLL_INTERVAL_MS);
         if (floatingLyricsEnabled) {
             if (canDrawOverlays()) {
                 showFloatingLyrics();
@@ -230,6 +247,14 @@ public class MainActivity extends Activity {
                 updateFloatingLyricsButton();
             }
         }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        activityResumed = false;
+        handler.removeCallbacks(pollTick);
+        handler.removeCallbacks(pendingRescan);
     }
 
     @Override
@@ -1412,6 +1437,9 @@ public class MainActivity extends Activity {
             }
             return;
         }
+        if (!scanInFlight.compareAndSet(false, true)) {
+            return;
+        }
         final boolean keepPlayback = currentPlaybackItem() != null;
         final List<RootInfo> rootsSnapshot = new ArrayList<>(roots);
         final List<WorkItem> cachedOrder = new ArrayList<>(works);
@@ -1441,13 +1469,26 @@ public class MainActivity extends Activity {
                 }
             }
             List<WorkItem> merged = mergeWorks(scanned, cachedOrder);
+            scanInFlight.set(false);
             handler.post(() -> applyScanResults(merged, auto, keepPlayback));
         });
     }
 
     private void applyScanResults(List<WorkItem> merged, boolean auto, boolean keepPlayback) {
+        boolean keepBrowsing = false;
+        if (auto && activeWork != null) {
+            for (WorkItem work : merged) {
+                if (work.key.equals(activeWork.key)) {
+                    activeWork = work;
+                    playlist.clear();
+                    playlist.addAll(work.tracks);
+                    keepBrowsing = true;
+                    break;
+                }
+            }
+        }
         works.clear();
-        if (!keepPlayback) {
+        if (!keepPlayback && !keepBrowsing) {
             playlist.clear();
             playbackQueue.clear();
             cues.clear();
@@ -1464,25 +1505,34 @@ public class MainActivity extends Activity {
         saveLibraryCache();
         browserAdapter.notifyDataSetChanged();
         updateMiniPlayer();
-        folderView.setText(rootNamesText());
+        boolean onWorksPage = currentTab == TAB_MY && pageMode == PAGE_WORKS;
+        if (!auto || onWorksPage) {
+            folderView.setText(rootNamesText());
+        }
         if (!auto) {
             currentTab = TAB_MY;
             pageMode = PAGE_WORKS;
             updatePageChrome(false);
         }
         if (works.isEmpty()) {
-            sectionTitleView.setText("作品列表");
-            sectionSubtitleView.setText("没有识别到可播放作品");
-            titleView.setText("没有识别到 ASMR 音频作品");
-            lyricView.setText("请确认所选目录内包含 RJ 作品文件夹或音频文件");
-            statusView.setText(auto ? "目录已无作品" : works.size() + " 个作品");
-        } else {
+            if (!auto || onWorksPage) {
+                sectionTitleView.setText("作品列表");
+                sectionSubtitleView.setText("没有识别到可播放作品");
+                titleView.setText("没有识别到 ASMR 音频作品");
+                lyricView.setText("请确认所选目录内包含 RJ 作品文件夹或音频文件");
+                statusView.setText("目录已无作品");
+            }
+        } else if (!auto || onWorksPage) {
             sectionTitleView.setText("作品列表");
             sectionSubtitleView.setText("已识别 " + works.size() + " 个作品");
             titleView.setText("已识别 " + works.size() + " 个作品");
             lyricView.setText("点击作品查看音轨并播放");
             showWorkPreview(visibleWorks().get(0));
-            statusView.setText(auto ? "检测到文件变化，已自动刷新" : works.size() + " 个作品");
+        }
+        if (auto && onWorksPage) {
+            statusView.setText("检测到文件变化，已自动刷新");
+        } else if (!auto) {
+            statusView.setText(works.size() + " 个作品");
         }
     }
 

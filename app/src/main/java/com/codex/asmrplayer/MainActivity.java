@@ -213,7 +213,7 @@ public class MainActivity extends Activity {
     private TextView statusView;
     private WaveformView waveform;
     private Button playButton;
-    private Button lyricsButton;
+    private ImageButton lyricsButton;
     private LinearLayout miniPlayer;
     private ImageView miniCoverThumb;
     private TextView miniTitleView;
@@ -233,10 +233,7 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         darkTheme = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_DARK_THEME, false);
         computeThemeColors();
-        Window window = getWindow();
-        window.setStatusBarColor(colorBg);
-        window.setNavigationBarColor(colorBg);
-        hideSystemBars();
+        applySystemBarAppearance();
         if (workPlaceholder != null) {
             workPlaceholder.setColor(colorTextSecondary);
         }
@@ -281,7 +278,7 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         activityResumed = true;
-        hideSystemBars();
+        applySystemBarAppearance();
         if (!roots.isEmpty()) {
             rescanLibrary(true);
         }
@@ -310,7 +307,7 @@ public class MainActivity extends Activity {
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) {
-            hideSystemBars();
+            applySystemBarAppearance();
         }
     }
 
@@ -470,39 +467,26 @@ public class MainActivity extends Activity {
         controls.setGravity(Gravity.CENTER);
         playerArea.addView(controls, new LinearLayout.LayoutParams(-1, dp(62)));
 
-        controls.addView(iconButton("⏮", v -> playRelative(-1, true)), buttonParams());
-        controls.addView(iconButton("-15", v -> seekBy(-15000)), buttonParams());
+        controls.addView(controlButton("⏮", v -> playRelative(-1, true)), buttonParams());
+        controls.addView(controlButton("-15", v -> seekBy(-15000)), buttonParams());
         playButton = new Button(this);
         playButton.setText(ICON_PLAY);
         playButton.setTextColor(Color.WHITE);
         playButton.setTextSize(20);
         playButton.setAllCaps(false);
-        playButton.setBackgroundResource(android.R.color.transparent);
-        playButton.setBackground(roundRect(colorAccent, 24));
+        playButton.setBackground(roundRect(colorAccent, 27));
         playButton.setOnClickListener(v -> togglePlayback());
         playButton.setMinWidth(0);
         playButton.setMinimumWidth(0);
         playButton.setPadding(0, 0, 0, 0);
-        LinearLayout.LayoutParams playParams = new LinearLayout.LayoutParams(0, dp(48), 1.15f);
+        LinearLayout.LayoutParams playParams = new LinearLayout.LayoutParams(0, dp(54), 1.15f);
         playParams.leftMargin = dp(3);
         playParams.rightMargin = dp(3);
         controls.addView(playButton, playParams);
-        controls.addView(iconButton("+15", v -> seekBy(15000)), buttonParams());
-        controls.addView(iconButton("⏭", v -> playRelative(1, true)), buttonParams());
-        lyricsButton = new Button(this);
-        lyricsButton.setText(ICON_LYRICS);
-        lyricsButton.setContentDescription("台词");
-        lyricsButton.setTextColor(colorTextPrimary);
-        lyricsButton.setTextSize(20);
-        lyricsButton.setAllCaps(false);
-        lyricsButton.setBackgroundColor(Color.TRANSPARENT);
-        lyricsButton.setOnClickListener(v -> showLyrics());
-        lyricsButton.setMinWidth(0);
-        lyricsButton.setMinimumWidth(0);
-        lyricsButton.setPadding(0, 0, 0, 0);
-        LinearLayout.LayoutParams lyricsParams = new LinearLayout.LayoutParams(0, dp(44), 1f);
-        lyricsParams.leftMargin = dp(2);
-        lyricsParams.rightMargin = dp(2);
+        controls.addView(controlButton("+15", v -> seekBy(15000)), buttonParams());
+        controls.addView(controlButton("⏭", v -> playRelative(1, true)), buttonParams());
+        lyricsButton = controlButton(ICON_LYRICS, v -> showLyrics());
+        LinearLayout.LayoutParams lyricsParams = buttonParams();
         controls.addView(lyricsButton, lyricsParams);
 
         LinearLayout meta = new LinearLayout(this);
@@ -577,7 +561,6 @@ public class MainActivity extends Activity {
         miniPlayer.setOrientation(LinearLayout.VERTICAL);
         miniPlayer.setPadding(dp(12), dp(6), dp(12), dp(4));
         miniPlayer.setBackground(cardDrawable());
-        miniPlayer.setElevation(dp(3));
         miniPlayer.setVisibility(View.GONE);
         miniPlayer.setOnClickListener(v -> showPlayer());
         LinearLayout.LayoutParams miniParams = new LinearLayout.LayoutParams(-1, dp(62));
@@ -602,19 +585,22 @@ public class MainActivity extends Activity {
         miniTitleView.setPadding(dp(8), 0, 0, 0);
         miniTop.addView(miniTitleView, new LinearLayout.LayoutParams(0, -1, 1));
 
-        miniTop.addView(iconButton("⏮", v -> playRelative(-1, false)), new LinearLayout.LayoutParams(dp(38), dp(34)));
+        miniTop.addView(miniControlButton("⏮", v -> playRelative(-1, false)), new LinearLayout.LayoutParams(dp(40), dp(36)));
         miniPlayButton = new Button(this);
         miniPlayButton.setText(ICON_PAUSE);
         miniPlayButton.setTextColor(Color.WHITE);
-        miniPlayButton.setTextSize(18);
+        miniPlayButton.setTextSize(16);
         miniPlayButton.setAllCaps(false);
-        miniPlayButton.setBackground(roundRect(colorAccent, 17));
+        miniPlayButton.setMinWidth(0);
+        miniPlayButton.setMinimumWidth(0);
+        miniPlayButton.setPadding(0, 0, 0, 0);
+        miniPlayButton.setBackground(roundRect(colorAccent, 18));
         miniPlayButton.setOnClickListener(v -> togglePlayback());
-        LinearLayout.LayoutParams miniPlayParams = new LinearLayout.LayoutParams(dp(52), dp(34));
+        LinearLayout.LayoutParams miniPlayParams = new LinearLayout.LayoutParams(dp(40), dp(36));
         miniPlayParams.leftMargin = dp(6);
         miniPlayParams.rightMargin = dp(6);
         miniTop.addView(miniPlayButton, miniPlayParams);
-        miniTop.addView(iconButton("⏭", v -> playRelative(1, false)), new LinearLayout.LayoutParams(dp(38), dp(34)));
+        miniTop.addView(miniControlButton("⏭", v -> playRelative(1, false)), new LinearLayout.LayoutParams(dp(40), dp(36)));
 
         miniSeekBar = new SeekBar(this);
         miniSeekBar.setProgressDrawable(lineSeekDrawable());
@@ -707,24 +693,26 @@ public class MainActivity extends Activity {
         return layer;
     }
 
-    private void hideSystemBars() {
+    private void applySystemBarAppearance() {
         Window window = getWindow();
-        View decorView = window.getDecorView();
+        window.setStatusBarColor(colorBg);
+        window.setNavigationBarColor(colorBg);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            WindowInsetsController controller = decorView.getWindowInsetsController();
+            WindowInsetsController controller = window.getDecorView().getWindowInsetsController();
             if (controller != null) {
-                controller.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
-                controller.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                int appearance = darkTheme ? 0
+                        : (WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                        | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);
+                controller.setSystemBarsAppearance(appearance,
+                        WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                                | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);
             }
-        } else {
-            decorView.setSystemUiVisibility(
-                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                            | View.SYSTEM_UI_FLAG_FULLSCREEN
-                            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                            | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-            );
+        } else if (!darkTheme) {
+            int flags = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                flags |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+            }
+            window.getDecorView().setSystemUiVisibility(flags);
         }
     }
 
@@ -949,7 +937,6 @@ public class MainActivity extends Activity {
         GradientDrawable drawable = cardDrawable();
         drawable.setCornerRadius(dp(16));
         panel.setBackground(drawable);
-        panel.setElevation(dp(2));
         return panel;
     }
 
@@ -997,10 +984,22 @@ public class MainActivity extends Activity {
     }
 
     private LinearLayout.LayoutParams buttonParams() {
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(44), 1f);
-        params.leftMargin = dp(2);
-        params.rightMargin = dp(2);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(46), 1f);
+        params.leftMargin = dp(3);
+        params.rightMargin = dp(3);
         return params;
+    }
+
+    private ImageButton controlButton(String text, View.OnClickListener listener) {
+        ImageButton button = new ImageButton(this);
+        button.setContentDescription(text);
+        button.setBackgroundColor(Color.TRANSPARENT);
+        TextDrawable drawable = new TextDrawable(text, dp(15));
+        drawable.setColor(colorIcon);
+        button.setImageDrawable(drawable);
+        button.setPadding(0, 0, 0, 0);
+        button.setOnClickListener(listener);
+        return button;
     }
 
     private ImageButton iconButton(String text, View.OnClickListener listener) {
@@ -1010,6 +1009,18 @@ public class MainActivity extends Activity {
         TextDrawable drawable = new TextDrawable(text);
         drawable.setColor(colorIcon);
         button.setImageDrawable(drawable);
+        button.setOnClickListener(listener);
+        return button;
+    }
+
+    private ImageButton miniControlButton(String text, View.OnClickListener listener) {
+        ImageButton button = new ImageButton(this);
+        button.setContentDescription(text);
+        button.setBackgroundColor(Color.TRANSPARENT);
+        TextDrawable drawable = new TextDrawable(text, dp(13));
+        drawable.setColor(colorIcon);
+        button.setImageDrawable(drawable);
+        button.setPadding(0, 0, 0, 0);
         button.setOnClickListener(listener);
         return button;
     }
@@ -2139,7 +2150,7 @@ public class MainActivity extends Activity {
         folderView.setText(work.tracks.size() + " 首音轨");
         lyricView.setText("点击音轨开始播放");
         if (work.cover != null) {
-            coverView.setImageURI(work.cover.uri);
+            showBigImage(work.cover);
         }
         statusView.setText("作品已打开");
         updateMiniPlayer();
@@ -2159,7 +2170,7 @@ public class MainActivity extends Activity {
         folderView.setText(works.size() + " 个作品");
         lyricView.setText(works.isEmpty() ? "请选择包含 RJ 文件夹或音频文件的目录" : "点击作品查看音轨并播放");
         if (activeWork != null && activeWork.cover != null) {
-            coverView.setImageURI(activeWork.cover.uri);
+            showBigImage(activeWork.cover);
         }
         updateMiniPlayer();
     }
@@ -2184,7 +2195,7 @@ public class MainActivity extends Activity {
         lyricView.setText(current == null ? "点击音轨进入播放页" : "正在播放: " + current.audio.name);
         statusView.setText(currentIndex >= 0 && player != null && player.isPlaying() ? "播放中" : "音轨列表");
         if (activeWork.cover != null) {
-            coverView.setImageURI(activeWork.cover.uri);
+            showBigImage(activeWork.cover);
         }
         updateMiniPlayer();
     }
@@ -2471,7 +2482,7 @@ public class MainActivity extends Activity {
 
     private void showWorkPreview(WorkItem work) {
         if (work.cover != null) {
-            coverView.setImageURI(work.cover.uri);
+            showBigImage(work.cover);
         } else {
             coverView.setImageDrawable(null);
         }
@@ -2610,11 +2621,13 @@ public class MainActivity extends Activity {
                 waveform.setPosition(position, duration);
             }
             timeView.setText(formatTime(position) + " / " + formatTime(duration));
-            miniSeekBar.setMax(duration);
+            if (miniSeekBar.getMax() != duration) {
+                miniSeekBar.setMax(duration);
+            }
             miniSeekBar.setProgress(position);
             miniTimeView.setText(formatTime(position) + " / " + formatTime(duration));
             updateLyric(position);
-            if (player.isPlaying()) {
+            if (player.isPlaying() && !"播放中".contentEquals(statusView.getText())) {
                 statusView.setText("播放中");
             }
             updateMiniPlayer();
@@ -2830,14 +2843,24 @@ public class MainActivity extends Activity {
             return;
         }
         miniTitleView.setText(item.audio.name);
-        loadCoverInto(miniCoverThumb, playbackWork != null ? playbackWork.cover : null);
+        Object coverTag = miniCoverThumb.getTag();
+        String coverKey = playbackWork != null && playbackWork.cover != null
+                ? playbackWork.cover.uri.toString() : null;
+        if (!TextUtils.equals(coverKey, coverTag == null ? null : coverTag.toString())) {
+            loadCoverInto(miniCoverThumb, playbackWork != null ? playbackWork.cover : null);
+        }
         boolean playing = false;
         try {
             playing = player.isPlaying();
         } catch (IllegalStateException ignored) {
         }
-        miniPlayButton.setText(playing ? ICON_PAUSE : ICON_PLAY);
-        playButton.setText(playing ? ICON_PAUSE : ICON_PLAY);
+        String playGlyph = playing ? ICON_PAUSE : ICON_PLAY;
+        if (!playGlyph.contentEquals(miniPlayButton.getText())) {
+            miniPlayButton.setText(playGlyph);
+        }
+        if (!playGlyph.contentEquals(playButton.getText())) {
+            playButton.setText(playGlyph);
+        }
     }
 
     private void showCurrentTrackImage() {
@@ -3662,7 +3685,6 @@ public class MainActivity extends Activity {
                 GradientDrawable rowBg = cardDrawable();
                 rowBg.setCornerRadius(dp(14));
                 row.setBackground(rowBg);
-                row.setElevation(dp(2));
 
                 holder = new WorkRowHolder();
                 holder.thumb = new ImageView(MainActivity.this);
@@ -3714,7 +3736,6 @@ public class MainActivity extends Activity {
                 GradientDrawable rowBg = cardDrawable();
                 rowBg.setCornerRadius(dp(14));
                 row.setBackground(rowBg);
-                row.setElevation(dp(2));
 
                 holder = new TrackRowHolder();
                 holder.title = label("", 15, colorTextPrimary);
@@ -3866,7 +3887,6 @@ public class MainActivity extends Activity {
             GradientDrawable rowBg = cardDrawable();
             rowBg.setCornerRadius(dp(14));
             row.setBackground(rowBg);
-            row.setElevation(dp(2));
 
             TextView title = label(recent.trackName, 15, colorTextPrimary);
             title.setSingleLine(true);
@@ -4088,10 +4108,16 @@ public class MainActivity extends Activity {
 
     private static class TextDrawable extends android.graphics.drawable.Drawable {
         private final String text;
+        private final int fixedTextSize;
         private final android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
 
         TextDrawable(String text) {
+            this(text, 0);
+        }
+
+        TextDrawable(String text, int textSizePx) {
             this.text = text;
+            this.fixedTextSize = textSizePx;
             paint.setColor(Color.WHITE);
             paint.setTextAlign(android.graphics.Paint.Align.CENTER);
             paint.setFakeBoldText(true);
@@ -4105,7 +4131,11 @@ public class MainActivity extends Activity {
         @Override
         public void draw(android.graphics.Canvas canvas) {
             android.graphics.Rect bounds = getBounds();
-            paint.setTextSize(Math.max(18, bounds.height() * 0.28f));
+            if (fixedTextSize > 0) {
+                paint.setTextSize(fixedTextSize);
+            } else {
+                paint.setTextSize(Math.max(18, bounds.height() * 0.28f));
+            }
             android.graphics.Paint.FontMetrics metrics = paint.getFontMetrics();
             float y = bounds.centerY() - (metrics.ascent + metrics.descent) / 2f;
             canvas.drawText(text, bounds.centerX(), y, paint);

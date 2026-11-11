@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
@@ -124,7 +125,7 @@ final class NetClient {
             if (name.endsWith("/")) {
                 name = name.substring(0, name.length() - 1);
             }
-            if (name.isEmpty() || name.equals(".") || name.equals("..")) {
+            if (name.isEmpty() || name.equals(".") || name.equals("..") || isSystemEntry(name)) {
                 continue;
             }
             String rel = relDir.isEmpty() ? name : relDir + "/" + name;
@@ -227,7 +228,8 @@ final class NetClient {
         }
         for (FTPFile file : files) {
             String name = file.getName();
-            if (name == null || name.isEmpty() || name.equals(".") || name.equals("..")) {
+            if (name == null || name.isEmpty() || name.equals(".") || name.equals("..")
+                    || isSystemEntry(name)) {
                 continue;
             }
             String rel = relDir.isEmpty() ? name : relDir + "/" + name;
@@ -241,6 +243,17 @@ final class NetClient {
                 out.add(new Entry(name, relDir, false, size));
             }
         }
+    }
+
+    /** 跳过 NAS 回收站、索引目录等系统条目，避免大库无谓扫描。 */
+    private static boolean isSystemEntry(String name) {
+        if (name.startsWith("#") || name.startsWith("@") || name.startsWith(".")) {
+            return true;
+        }
+        String lower = name.toLowerCase(Locale.ROOT);
+        return lower.equals("system volume information")
+                || lower.equals("$recycle.bin")
+                || lower.equals("recycler");
     }
 
     private static String joinRemote(String remoteDir, String name) {

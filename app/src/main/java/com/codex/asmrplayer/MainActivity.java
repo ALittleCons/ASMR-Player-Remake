@@ -28,6 +28,7 @@ import android.os.Looper;
 import android.provider.DocumentsContract;
 import android.provider.Settings;
 import android.text.TextUtils;
+import android.util.Log;
 import android.util.LruCache;
 import android.view.Gravity;
 import android.view.GestureDetector;
@@ -59,6 +60,7 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -101,6 +103,8 @@ public class MainActivity extends Activity {
     private static final long RESCAN_DEBOUNCE_MS = 1200;
     private static final java.util.regex.Pattern RJ_CODE_PATTERN = java.util.regex.Pattern.compile("rj\\d{2,}");
     private static final long POLL_INTERVAL_MS = 6000;
+    /** 含网络路径时自动重扫的最小间隔，避免每 6 秒全量列举远端目录。 */
+    private static final long NET_RESCAN_MIN_MS = 60000;
     private static final String KEY_LIBRARY_CACHE = "library_cache";
     private static final String KEY_FLOATING_LYRICS = "floating_lyrics";
     private static final String KEY_FLOATING_LINES = "floating_lines";
@@ -154,7 +158,10 @@ public class MainActivity extends Activity {
     private final List<NetSource> netSources = new ArrayList<>();
     private int filterRootIndex = -1;
     private final ExecutorService scanExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService cacheExecutor = Executors.newSingleThreadExecutor();
     private final AtomicBoolean scanInFlight = new AtomicBoolean(false);
+    private volatile long lastCacheFingerprint = -1;
+    private volatile long lastNetScanAt = 0L;
     private final Runnable pendingRescan = () -> rescanLibrary(true);
     private Runnable pollTick;
     private ContentObserver libraryObserver;
@@ -254,6 +261,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        purgeLegacyCacheIfOversized();
         darkTheme = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_DARK_THEME, false);
         computeThemeColors();
         applySystemBarAppearance();
@@ -300,6 +308,7 @@ public class MainActivity extends Activity {
         releasePlayer();
         imageExecutor.shutdownNow();
         scanExecutor.shutdownNow();
+        cacheExecutor.shutdownNow();
     }
 
     @Override
@@ -1928,6 +1937,16 @@ public class MainActivity extends Activity {
             }
             return;
         }
+        boolean hasNetRoot = false;
+        for (RootInfo candidate : roots) {
+            if (candidate.net != null) {
+                hasNetRoot = true;
+                break;
+            }
+        }
+        if (auto && hasNetRoot && System.currentTimeMillis() - lastNetScanAt < NET_RESCAN_MIN_MS) {
+            return;
+        }
         if (!scanInFlight.compareAndSet(false, true)) {
             return;
         }
@@ -1938,6 +1957,7 @@ public class MainActivity extends Activity {
             statusView.setText("扫描中...");
         }
         scanExecutor.execute(() -> {
+            lastNetScanAt = System.currentTimeMillis();
             List<WorkItem> scanned = new ArrayList<>();
             Collator collator = Collator.getInstance(Locale.CHINA);
             for (RootInfo root : rootsSnapshot) {
@@ -2088,176 +2108,97 @@ public class MainActivity extends Activity {
     }
 
     private boolean loadCachedLibrary() {
-        String cache = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_LIBRARY_CACHE, null);
-        if (TextUtils.isEmpty(cache)) {
+        // 旧版缓存把整库 JSON 存进 SharedPreferences，大库读入即 OOM，直接废弃。
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(KEY_LIBRARY_CACHE).apply();
+        File cacheFile = libraryCacheFile();
+        if (!cacheFile.isFile()) {
             return false;
         }
+        List<WorkItem> loaded;
         try {
-            JSONObject root = new JSONObject(cache);
-            JSONArray array = root.optJSONArray("works");
-            if (array == null) {
-                return false;
-            }
-            works.clear();
-            playlist.clear();
-            cues.clear();
-            activeWork = null;
-            playbackWork = null;
-            currentIndex = -1;
-            movingWorkIndex = -1;
-            movingTrackIndex = -1;
-            draggingListItem = false;
-            resetPlaybackUi();
-            updateMiniPlayer();
-            for (int i = 0; i < array.length(); i++) {
-                WorkItem work = workFromJson(array.getJSONObject(i));
-                if (!work.tracks.isEmpty()) {
-                    works.add(work);
-                }
-            }
-            currentTab = TAB_MY;
-            pageMode = PAGE_WORKS;
-            browserAdapter.notifyDataSetChanged();
-            updatePageChrome(false);
-            folderView.setText(rootNamesText());
-            statusView.setText("已加载缓存");
-            if (works.isEmpty()) {
-                sectionTitleView.setText("作品列表");
-                sectionSubtitleView.setText("缓存中没有可播放作品");
-                titleView.setText("未找到缓存作品");
-                lyricView.setText("请选择文件夹重新扫描");
-            } else {
-                sectionTitleView.setText("作品列表");
-                sectionSubtitleView.setText("已预加载 " + works.size() + " 个作品");
-                titleView.setText("已预加载 " + works.size() + " 个作品");
-                lyricView.setText("点击作品查看音轨并播放");
-                showWorkPreview(works.get(0));
-            }
-            return true;
-        } catch (JSONException ex) {
-            getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(KEY_LIBRARY_CACHE).apply();
+            loaded = LibraryCache.load(cacheFile);
+        } catch (Exception | OutOfMemoryError ex) {
+            //noinspection ResultOfMethodCallIgnored
+            cacheFile.delete();
             return false;
         }
+        if (loaded.isEmpty()) {
+            return false;
+        }
+        works.clear();
+        playlist.clear();
+        cues.clear();
+        activeWork = null;
+        playbackWork = null;
+        currentIndex = -1;
+        movingWorkIndex = -1;
+        movingTrackIndex = -1;
+        draggingListItem = false;
+        resetPlaybackUi();
+        updateMiniPlayer();
+        works.addAll(loaded);
+        lastCacheFingerprint = libraryFingerprint(works);
+        currentTab = TAB_MY;
+        pageMode = PAGE_WORKS;
+        browserAdapter.notifyDataSetChanged();
+        updatePageChrome(false);
+        folderView.setText(rootNamesText());
+        statusView.setText("已加载缓存");
+        sectionTitleView.setText("作品列表");
+        sectionSubtitleView.setText("已预加载 " + works.size() + " 个作品");
+        titleView.setText("已预加载 " + works.size() + " 个作品");
+        lyricView.setText("点击作品查看音轨并播放");
+        showWorkPreview(works.get(0));
+        return true;
+    }
+
+    /**
+     * 旧版把整库 JSON 存进 SharedPreferences，大库残留会让首次读取直接 OOM。
+     * 正常配置只有几 KB，超过 4MB 判定为旧缓存并丢弃（需要重新添加路径）。
+     */
+    private void purgeLegacyCacheIfOversized() {
+        File prefsFile = new File(new File(getFilesDir().getParentFile(), "shared_prefs"), PREFS + ".xml");
+        if (prefsFile.isFile() && prefsFile.length() > 4L * 1024 * 1024) {
+            //noinspection ResultOfMethodCallIgnored
+            prefsFile.delete();
+            Toast.makeText(this, "已清除旧版缓存，请重新添加文件夹路径", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private File libraryCacheFile() {
+        return new File(getFilesDir(), "library_cache_v2.json");
+    }
+
+    /** 内容指纹：自动重扫结果没变化时不再重复写盘。 */
+    private static long libraryFingerprint(List<WorkItem> snapshot) {
+        long hash = 1125899906842597L;
+        for (WorkItem work : snapshot) {
+            hash = hash * 31 + (work.key == null ? 0 : work.key.hashCode());
+            hash = hash * 31 + work.tracks.size();
+            for (MediaItem item : work.tracks) {
+                hash = hash * 31 + (item.audio == null || item.audio.uri == null
+                        ? 0 : item.audio.uri.toString().hashCode());
+            }
+        }
+        return hash;
     }
 
     private void saveLibraryCache() {
-        try {
-            JSONObject root = new JSONObject();
-            root.put("treeUri", getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_TREE_URI, ""));
-            JSONArray rootUris = new JSONArray();
-            for (RootInfo rootInfo : roots) {
-                rootUris.put(rootInfo.uri);
+        final List<WorkItem> snapshot = new ArrayList<>(works);
+        long fingerprint = libraryFingerprint(snapshot);
+        if (fingerprint == lastCacheFingerprint) {
+            return;
+        }
+        lastCacheFingerprint = fingerprint;
+        cacheExecutor.execute(() -> {
+            try {
+                LibraryCache.save(libraryCacheFile(), snapshot);
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit().remove(KEY_LIBRARY_CACHE).apply();
+            } catch (Exception | OutOfMemoryError ex) {
+                lastCacheFingerprint = -1;
+                Log.w("AsmrPlayer", "保存作品缓存失败: " + ex);
             }
-            root.put("treeUris", rootUris);
-            JSONArray array = new JSONArray();
-            for (WorkItem work : works) {
-                array.put(workToJson(work));
-            }
-            root.put("works", array);
-            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                    .putString(KEY_LIBRARY_CACHE, root.toString())
-                    .apply();
-        } catch (JSONException ignored) {
-        }
-    }
-
-    private JSONObject workToJson(WorkItem work) throws JSONException {
-        JSONObject object = new JSONObject();
-        object.put("key", work.key);
-        object.put("name", work.name);
-        object.put("rootUri", work.rootUri == null ? "" : work.rootUri);
-        object.put("cover", fileToJson(work.cover));
-        JSONArray tracks = new JSONArray();
-        for (MediaItem item : work.tracks) {
-            tracks.put(mediaToJson(item));
-        }
-        object.put("tracks", tracks);
-        return object;
-    }
-
-    private WorkItem workFromJson(JSONObject object) throws JSONException {
-        String name = object.optString("name", "");
-        String key = object.optString("key", name);
-        FileDoc cover = fileFromJson(object.optJSONObject("cover"));
-        JSONArray trackArray = object.optJSONArray("tracks");
-        List<MediaItem> tracks = new ArrayList<>();
-        if (trackArray != null) {
-            for (int i = 0; i < trackArray.length(); i++) {
-                MediaItem item = mediaFromJson(trackArray.getJSONObject(i));
-                if (item != null) {
-                    tracks.add(item);
-                }
-            }
-        }
-        WorkItem work = new WorkItem(key, name, cover, tracks);
-        work.rootUri = object.optString("rootUri", "");
-        if (cover != null) {
-            for (MediaItem item : work.tracks) {
-                item.moveCoverFirst(cover);
-            }
-        }
-        return work;
-    }
-
-    private JSONObject mediaToJson(MediaItem item) throws JSONException {
-        JSONObject object = new JSONObject();
-        object.put("audio", fileToJson(item.audio));
-        object.put("vtt", fileToJson(item.vtt));
-        JSONArray images = new JSONArray();
-        for (FileDoc image : item.images) {
-            images.put(fileToJson(image));
-        }
-        object.put("images", images);
-        return object;
-    }
-
-    private MediaItem mediaFromJson(JSONObject object) throws JSONException {
-        FileDoc audio = fileFromJson(object.optJSONObject("audio"));
-        if (audio == null) {
-            return null;
-        }
-        FileDoc vtt = fileFromJson(object.optJSONObject("vtt"));
-        JSONArray imageArray = object.optJSONArray("images");
-        List<FileDoc> images = new ArrayList<>();
-        if (imageArray != null) {
-            for (int i = 0; i < imageArray.length(); i++) {
-                FileDoc image = fileFromJson(imageArray.optJSONObject(i));
-                if (image != null) {
-                    images.add(image);
-                }
-            }
-        }
-        return new MediaItem(audio, images, vtt);
-    }
-
-    private Object fileToJson(FileDoc file) throws JSONException {
-        if (file == null) {
-            return JSONObject.NULL;
-        }
-        JSONObject object = new JSONObject();
-        object.put("name", file.name);
-        object.put("mime", file.mime);
-        object.put("uri", file.uri.toString());
-        object.put("relativePath", file.relativePath);
-        object.put("parentPath", file.parentPath);
-        return object;
-    }
-
-    private FileDoc fileFromJson(JSONObject object) {
-        if (object == null) {
-            return null;
-        }
-        String uri = object.optString("uri", "");
-        if (TextUtils.isEmpty(uri)) {
-            return null;
-        }
-        return new FileDoc(
-                object.optString("name", ""),
-                object.optString("mime", ""),
-                Uri.parse(uri),
-                object.optString("relativePath", ""),
-                object.optString("parentPath", "")
-        );
+        });
     }
 
     private List<WorkBuilder> buildWorks(List<FileDoc> files, String selectedName, String keyPrefix) {
@@ -5175,7 +5116,7 @@ public class MainActivity extends Activity {
         return (dot > 0 ? name.substring(0, dot) : name).toLowerCase(Locale.ROOT);
     }
 
-    private static class FileDoc {
+    static class FileDoc {
         final String name;
         final String mime;
         final Uri uri;
@@ -5191,7 +5132,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private static class WorkItem {
+    static class WorkItem {
         final String key;
         final String name;
         final FileDoc cover;
@@ -5217,7 +5158,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private static class MediaItem {
+    static class MediaItem {
         final String key;
         final FileDoc audio;
         final FileDoc image;

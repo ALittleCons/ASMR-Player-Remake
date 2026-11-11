@@ -51,6 +51,7 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.SeekBar;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 import android.webkit.WebSettings;
@@ -189,6 +190,7 @@ public class MainActivity extends Activity {
     private ListView webHistoryList;
     private ListView recentList;
     private LinearLayout settingsArea;
+    private ScrollView settingsScroll;
     private LinearLayout contentPanel;
     private LinearLayout bottomNav;
     private Button findTabButton;
@@ -560,8 +562,14 @@ public class MainActivity extends Activity {
         contentPanel.addView(recentList, new LinearLayout.LayoutParams(-1, 0, 1));
 
         settingsArea = buildSettingsArea();
-        settingsArea.setVisibility(View.GONE);
-        contentPanel.addView(settingsArea, new LinearLayout.LayoutParams(-1, 0, 1));
+        // 内层 settingsArea 的可见性由外层 settingsScroll 统一控制
+        // 设置内容较多时需要可滚动，否则底部"感谢使用"面板会被截断
+        settingsScroll = new ScrollView(this);
+        settingsScroll.setFillViewport(true);
+        settingsScroll.setVerticalScrollBarEnabled(false);
+        settingsScroll.addView(settingsArea, new LinearLayout.LayoutParams(-1, -2));
+        settingsScroll.setVisibility(View.GONE);
+        contentPanel.addView(settingsScroll, new LinearLayout.LayoutParams(-1, 0, 1));
 
         miniPlayer = new LinearLayout(this);
         miniPlayer.setOrientation(LinearLayout.VERTICAL);
@@ -2709,14 +2717,17 @@ public class MainActivity extends Activity {
         filterBar.setVisibility(listVisible && pageMode == PAGE_WORKS && roots.size() > 1 ? View.VISIBLE : View.GONE);
         lyricsList.setVisibility(lyricsVisible ? View.VISIBLE : View.GONE);
         recentList.setVisibility(currentTab == TAB_HEARD ? View.VISIBLE : View.GONE);
-        settingsArea.setVisibility(currentTab == TAB_SETTINGS ? View.VISIBLE : View.GONE);
+        settingsScroll.setVisibility(currentTab == TAB_SETTINGS ? View.VISIBLE : View.GONE);
+        if (currentTab == TAB_SETTINGS) {
+            settingsScroll.scrollTo(0, 0);
+        }
         updateBottomNav();
         updateMiniPlayer();
         if (animate) {
             View target = playerVisible ? playerArea
                     : (lyricsVisible ? lyricsList
                     : (listVisible ? browserList
-                    : (currentTab == TAB_HEARD ? recentList : settingsArea)));
+                    : (currentTab == TAB_HEARD ? recentList : settingsScroll)));
             target.setAlpha(0f);
             target.animate().alpha(1f).setDuration(180).start();
         }

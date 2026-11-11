@@ -13,6 +13,7 @@ import android.graphics.Color;
 import android.graphics.Matrix;
 import android.graphics.PixelFormat;
 import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.GradientDrawable;
 import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Build;
@@ -95,6 +96,7 @@ public class MainActivity extends Activity {
     private static final String KEY_FLOATING_LYRICS = "floating_lyrics";
     private static final String KEY_WEB_HISTORY = "web_history";
     private static final String KEY_RECENT_AUDIO = "recent_audio";
+    private static final String KEY_DARK_THEME = "dark_theme";
     private static final String GITHUB_URL = "https://github.com/Baimo1209/ASMR-Player";
 
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -154,6 +156,20 @@ public class MainActivity extends Activity {
     private WindowManager windowManager;
     private TextView floatingLyricView;
     private WindowManager.LayoutParams floatingLyricParams;
+
+    private boolean darkTheme;
+    private int colorBg;
+    private int colorTextPrimary;
+    private int colorTextSecondary;
+    private int colorAccent;
+    private int colorCard;
+    private int colorCardStroke;
+    private int colorChip;
+    private int colorIcon;
+    private int colorThumbBg;
+    private int colorWaveUnplayed;
+    private int colorLyric;
+
     private LinearLayout findArea;
     private EditText urlInput;
     private WebView webView;
@@ -195,11 +211,11 @@ public class MainActivity extends Activity {
     private TextView lyricView;
     private TextView timeView;
     private TextView statusView;
-    private SeekBar seekBar;
+    private WaveformView waveform;
     private Button playButton;
     private Button lyricsButton;
-    private Button backButton;
     private LinearLayout miniPlayer;
+    private ImageView miniCoverThumb;
     private TextView miniTitleView;
     private TextView miniTimeView;
     private SeekBar miniSeekBar;
@@ -207,14 +223,23 @@ public class MainActivity extends Activity {
     private HorizontalScrollView filterBar;
     private LinearLayout filterChipRow;
     private LinearLayout rootListContainer;
+    private boolean playerCollapseIntent;
+    private float playerCollapseDownX;
+    private float playerCollapseDownY;
+    private VelocityTracker collapseVelocityTracker;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        darkTheme = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_DARK_THEME, false);
+        computeThemeColors();
         Window window = getWindow();
-        window.setStatusBarColor(Color.rgb(16, 18, 21));
-        window.setNavigationBarColor(Color.rgb(16, 18, 21));
+        window.setStatusBarColor(colorBg);
+        window.setNavigationBarColor(colorBg);
         hideSystemBars();
+        if (workPlaceholder != null) {
+            workPlaceholder.setColor(colorTextSecondary);
+        }
         floatingLyricsEnabled = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_FLOATING_LYRICS, false);
         buildUi();
         loadWebHistory();
@@ -308,12 +333,10 @@ public class MainActivity extends Activity {
             return;
         }
         super.onBackPressed();
-    }
-
-    private void buildUi() {
+    }    private void buildUi() {
         rootLayout = new FrameLayout(this);
         FrameLayout root = rootLayout;
-        root.setBackgroundColor(Color.rgb(50, 18, 12));
+        root.setBackgroundColor(colorBg);
 
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
@@ -327,16 +350,6 @@ public class MainActivity extends Activity {
         top.setPadding(dp(24), 0, dp(24), 0);
         page.addView(top, new LinearLayout.LayoutParams(-1, dp(42)));
 
-        backButton = new Button(this);
-        backButton.setText("返回");
-        backButton.setTextColor(Color.WHITE);
-        backButton.setTextSize(14);
-        backButton.setAllCaps(false);
-        backButton.setVisibility(View.GONE);
-        backButton.setBackgroundResource(R.drawable.button_icon);
-        backButton.setOnClickListener(v -> goBackPage());
-        top.addView(backButton, new LinearLayout.LayoutParams(dp(72), dp(40)));
-
         TextView topSpacer = new TextView(this);
         top.addView(topSpacer, new LinearLayout.LayoutParams(0, -1, 1));
 
@@ -346,31 +359,47 @@ public class MainActivity extends Activity {
         sectionHeader.setPadding(dp(24), dp(18), dp(24), dp(8));
         page.addView(sectionHeader, new LinearLayout.LayoutParams(-1, dp(112)));
 
-        sectionTitleView = label("作品列表", 22, Color.WHITE);
+        sectionTitleView = label("作品列表", 22, colorTextPrimary);
         sectionTitleView.setSingleLine(true);
         sectionTitleView.setEllipsize(TextUtils.TruncateAt.END);
         sectionTitleView.setGravity(Gravity.CENTER);
         sectionHeader.addView(sectionTitleView, new LinearLayout.LayoutParams(-1, 0, 1));
 
-        sectionSubtitleView = label("请选择文件夹，自动识别 ASMR 作品", 13, Color.rgb(184, 193, 202));
+        LinearLayout subtitleRow = new LinearLayout(this);
+        subtitleRow.setOrientation(LinearLayout.HORIZONTAL);
+        subtitleRow.setGravity(Gravity.CENTER_VERTICAL);
+        TextView subtitleSpacerLeft = new TextView(this);
+        subtitleRow.addView(subtitleSpacerLeft, new LinearLayout.LayoutParams(0, -1, 1));
+
+        coverTopThumb = new ImageView(this);
+        coverTopThumb.setVisibility(View.GONE);
+        coverTopThumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        coverTopThumb.setBackgroundColor(colorThumbBg);
+        coverTopThumb.setOnClickListener(v -> {
+            currentImageIndex = 0;
+            showCurrentTrackImage();
+        });
+        LinearLayout.LayoutParams thumbParams = new LinearLayout.LayoutParams(dp(26), dp(26));
+        thumbParams.rightMargin = dp(6);
+        subtitleRow.addView(coverTopThumb, thumbParams);
+
+        sectionSubtitleView = label("请选择文件夹，自动识别 ASMR 作品", 13, colorTextSecondary);
         sectionSubtitleView.setSingleLine(true);
         sectionSubtitleView.setEllipsize(TextUtils.TruncateAt.END);
         sectionSubtitleView.setGravity(Gravity.CENTER);
-        sectionHeader.addView(sectionSubtitleView, new LinearLayout.LayoutParams(-1, 0, 1));
+        sectionSubtitleView.setMaxWidth(dp(240));
+        subtitleRow.addView(sectionSubtitleView, new LinearLayout.LayoutParams(-2, -1));
+
+        TextView subtitleSpacerRight = new TextView(this);
+        subtitleRow.addView(subtitleSpacerRight, new LinearLayout.LayoutParams(0, -1, 1));
+        sectionHeader.addView(subtitleRow, new LinearLayout.LayoutParams(-1, 0, 1));
 
         contentPanel = new LinearLayout(this);
         contentPanel.setOrientation(LinearLayout.VERTICAL);
         contentPanel.setPadding(dp(18), dp(14), dp(18), dp(10));
-        contentPanel.setBackgroundResource(R.drawable.content_panel);
         page.addView(contentPanel, new LinearLayout.LayoutParams(-1, 0, 1));
 
-        playerArea = new LinearLayout(this);
-        playerArea.setOrientation(LinearLayout.VERTICAL);
-        playerArea.setVisibility(View.GONE);
-        contentPanel.addView(playerArea, new LinearLayout.LayoutParams(-1, 0, 1));
-
         coverView = new ImageView(this);
-        coverView.setBackgroundColor(Color.rgb(31, 35, 41));
         coverView.setScaleType(ImageView.ScaleType.FIT_CENTER);
         playerImageGesture = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
             @Override
@@ -384,6 +413,12 @@ public class MainActivity extends Activity {
             handleImageTouch(event);
             return true;
         });
+
+        playerArea = new LinearLayout(this);
+        playerArea.setOrientation(LinearLayout.VERTICAL);
+        playerArea.setVisibility(View.GONE);
+        contentPanel.addView(playerArea, new LinearLayout.LayoutParams(-1, 0, 1));
+
         LinearLayout.LayoutParams coverParams = new LinearLayout.LayoutParams(-1, 0);
         coverParams.weight = 1f;
         coverParams.topMargin = dp(8);
@@ -394,7 +429,7 @@ public class MainActivity extends Activity {
         imageIndicator.setGravity(Gravity.CENTER);
         imageIndicator.setVisibility(View.GONE);
         imageIndicator.addView(miniIndicatorButton("‹", -1), new LinearLayout.LayoutParams(dp(34), -1));
-        imageIndexText = label("", 11, Color.rgb(96, 100, 106));
+        imageIndexText = label("", 11, colorTextSecondary);
         imageIndexText.setGravity(Gravity.CENTER);
         imageIndexText.setMinWidth(dp(42));
         imageIndicator.addView(imageIndexText, new LinearLayout.LayoutParams(-2, -1));
@@ -409,63 +444,26 @@ public class MainActivity extends Activity {
         infoParams.topMargin = dp(12);
         playerArea.addView(infoPanel, infoParams);
 
-        LinearLayout infoHeader = new LinearLayout(this);
-        infoHeader.setOrientation(LinearLayout.HORIZONTAL);
-        infoHeader.setGravity(Gravity.CENTER_VERTICAL);
-
-        coverTopThumb = new ImageView(this);
-        coverTopThumb.setVisibility(View.GONE);
-        coverTopThumb.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        coverTopThumb.setBackgroundColor(Color.rgb(31, 35, 41));
-        coverTopThumb.setOnClickListener(v -> {
-            currentImageIndex = 0;
-            showCurrentTrackImage();
-        });
-        infoHeader.addView(coverTopThumb, new LinearLayout.LayoutParams(dp(40), dp(40)));
-
-        titleView = label("请选择包含 RJ 作品文件夹的目录", 18, Color.WHITE);
+        titleView = label("请选择包含 RJ 作品文件夹的目录", 18, colorTextPrimary);
         titleView.setSingleLine(true);
         titleView.setEllipsize(TextUtils.TruncateAt.END);
-        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(-1, dp(40));
-        titleParams.leftMargin = dp(0);
-        infoHeader.addView(titleView, titleParams);
+        titleView.setGravity(Gravity.CENTER);
+        infoPanel.addView(titleView, new LinearLayout.LayoutParams(-1, dp(40)));
 
-        infoPanel.addView(infoHeader, new LinearLayout.LayoutParams(-1, dp(40)));
-
-        folderView = label("会递归识别 mp3/wav、图片和 .vtt，并自动按作品分组。", 13, Color.rgb(184, 193, 202));
+        folderView = label("会递归识别 mp3/wav、图片和 .vtt，并自动按作品分组。", 13, colorTextSecondary);
         folderView.setSingleLine(true);
         folderView.setEllipsize(TextUtils.TruncateAt.END);
+        folderView.setGravity(Gravity.CENTER);
         infoPanel.addView(folderView, new LinearLayout.LayoutParams(-1, dp(25)));
 
-        lyricView = label("", 15, Color.rgb(234, 239, 236));
+        lyricView = label("", 15, colorLyric);
         lyricView.setGravity(Gravity.CENTER);
         lyricView.setMaxLines(3);
         infoPanel.addView(lyricView, new LinearLayout.LayoutParams(-1, 0, 1));
 
-        seekBar = new SeekBar(this);
-        seekBar.setProgressDrawable(getDrawable(R.drawable.seekbar_progress));
-        seekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
-                if (fromUser && player != null) {
-                    timeView.setText(formatTime(progress) + " / " + formatTime(player.getDuration()));
-                }
-            }
-
-            @Override
-            public void onStartTrackingTouch(SeekBar bar) {
-                userSeeking = true;
-            }
-
-            @Override
-            public void onStopTrackingTouch(SeekBar bar) {
-                if (player != null) {
-                    player.seekTo(bar.getProgress());
-                }
-                userSeeking = false;
-            }
-        });
-        playerArea.addView(seekBar, new LinearLayout.LayoutParams(-1, dp(40)));
+        waveform = new WaveformView(this);
+        waveform.setOnTouchListener((v, event) -> handleWaveformTouch(event));
+        playerArea.addView(waveform, new LinearLayout.LayoutParams(-1, dp(46)));
 
         LinearLayout controls = new LinearLayout(this);
         controls.setOrientation(LinearLayout.HORIZONTAL);
@@ -479,7 +477,8 @@ public class MainActivity extends Activity {
         playButton.setTextColor(Color.WHITE);
         playButton.setTextSize(20);
         playButton.setAllCaps(false);
-        playButton.setBackgroundResource(R.drawable.button_primary);
+        playButton.setBackgroundResource(android.R.color.transparent);
+        playButton.setBackground(roundRect(colorAccent, 24));
         playButton.setOnClickListener(v -> togglePlayback());
         playButton.setMinWidth(0);
         playButton.setMinimumWidth(0);
@@ -493,10 +492,10 @@ public class MainActivity extends Activity {
         lyricsButton = new Button(this);
         lyricsButton.setText(ICON_LYRICS);
         lyricsButton.setContentDescription("台词");
-        lyricsButton.setTextColor(Color.WHITE);
+        lyricsButton.setTextColor(colorTextPrimary);
         lyricsButton.setTextSize(20);
         lyricsButton.setAllCaps(false);
-        lyricsButton.setBackgroundResource(R.drawable.button_icon);
+        lyricsButton.setBackgroundColor(Color.TRANSPARENT);
         lyricsButton.setOnClickListener(v -> showLyrics());
         lyricsButton.setMinWidth(0);
         lyricsButton.setMinimumWidth(0);
@@ -510,15 +509,15 @@ public class MainActivity extends Activity {
         meta.setOrientation(LinearLayout.HORIZONTAL);
         playerArea.addView(meta, new LinearLayout.LayoutParams(-1, dp(30)));
 
-        timeView = label("00:00 / 00:00", 12, Color.rgb(184, 193, 202));
+        timeView = label("00:00 / 00:00", 12, colorTextSecondary);
         meta.addView(timeView, new LinearLayout.LayoutParams(0, -1, 1));
-        statusView = label("未加载", 12, Color.rgb(184, 193, 202));
+        statusView = label("未加载", 12, colorTextSecondary);
         statusView.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
         meta.addView(statusView, new LinearLayout.LayoutParams(0, -1, 1));
 
         filterBar = new HorizontalScrollView(this);
         filterBar.setHorizontalScrollBarEnabled(false);
-        filterBar.setBackgroundColor(Color.rgb(235, 226, 214));
+        filterBar.setBackgroundColor(Color.TRANSPARENT);
         filterBar.setVisibility(View.GONE);
         filterChipRow = new LinearLayout(this);
         filterChipRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -577,7 +576,8 @@ public class MainActivity extends Activity {
         miniPlayer = new LinearLayout(this);
         miniPlayer.setOrientation(LinearLayout.VERTICAL);
         miniPlayer.setPadding(dp(12), dp(6), dp(12), dp(4));
-        miniPlayer.setBackgroundResource(R.drawable.mini_pill);
+        miniPlayer.setBackground(cardDrawable());
+        miniPlayer.setElevation(dp(3));
         miniPlayer.setVisibility(View.GONE);
         miniPlayer.setOnClickListener(v -> showPlayer());
         LinearLayout.LayoutParams miniParams = new LinearLayout.LayoutParams(-1, dp(62));
@@ -591,9 +591,15 @@ public class MainActivity extends Activity {
         miniTop.setGravity(Gravity.CENTER_VERTICAL);
         miniPlayer.addView(miniTop, new LinearLayout.LayoutParams(-1, dp(42)));
 
-        miniTitleView = label("未播放", 14, Color.rgb(20, 24, 35));
+        miniCoverThumb = new ImageView(this);
+        miniCoverThumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        miniCoverThumb.setBackgroundColor(colorThumbBg);
+        miniTop.addView(miniCoverThumb, new LinearLayout.LayoutParams(dp(40), dp(40)));
+
+        miniTitleView = label("未播放", 14, colorTextPrimary);
         miniTitleView.setSingleLine(true);
         miniTitleView.setEllipsize(TextUtils.TruncateAt.END);
+        miniTitleView.setPadding(dp(8), 0, 0, 0);
         miniTop.addView(miniTitleView, new LinearLayout.LayoutParams(0, -1, 1));
 
         miniTop.addView(iconButton("⏮", v -> playRelative(-1, false)), new LinearLayout.LayoutParams(dp(38), dp(34)));
@@ -602,7 +608,7 @@ public class MainActivity extends Activity {
         miniPlayButton.setTextColor(Color.WHITE);
         miniPlayButton.setTextSize(18);
         miniPlayButton.setAllCaps(false);
-        miniPlayButton.setBackgroundResource(R.drawable.button_primary);
+        miniPlayButton.setBackground(roundRect(colorAccent, 17));
         miniPlayButton.setOnClickListener(v -> togglePlayback());
         LinearLayout.LayoutParams miniPlayParams = new LinearLayout.LayoutParams(dp(52), dp(34));
         miniPlayParams.leftMargin = dp(6);
@@ -611,7 +617,8 @@ public class MainActivity extends Activity {
         miniTop.addView(iconButton("⏭", v -> playRelative(1, false)), new LinearLayout.LayoutParams(dp(38), dp(34)));
 
         miniSeekBar = new SeekBar(this);
-        miniSeekBar.setProgressDrawable(getDrawable(R.drawable.seekbar_progress));
+        miniSeekBar.setProgressDrawable(lineSeekDrawable());
+        miniSeekBar.setThumb(null);
         miniSeekBar.setOnTouchListener((v, event) -> {
             showPlayer();
             return true;
@@ -639,6 +646,65 @@ public class MainActivity extends Activity {
 
         updatePageChrome(false);
         setContentView(root);
+    }
+
+    private void computeThemeColors() {
+        if (darkTheme) {
+            colorBg = Color.rgb(15, 18, 22);
+            colorTextPrimary = Color.rgb(242, 244, 247);
+            colorTextSecondary = Color.rgb(154, 163, 174);
+            colorAccent = Color.rgb(242, 160, 61);
+            colorCard = Color.rgb(23, 27, 33);
+            colorCardStroke = Color.rgb(38, 44, 53);
+            colorChip = Color.rgb(30, 35, 43);
+            colorIcon = Color.rgb(213, 219, 227);
+            colorThumbBg = Color.rgb(34, 39, 47);
+            colorWaveUnplayed = Color.rgb(42, 47, 56);
+            colorLyric = Color.rgb(210, 216, 224);
+        } else {
+            colorBg = Color.rgb(255, 255, 255);
+            colorTextPrimary = Color.rgb(27, 30, 35);
+            colorTextSecondary = Color.rgb(138, 145, 156);
+            colorAccent = Color.rgb(242, 160, 61);
+            colorCard = Color.rgb(255, 255, 255);
+            colorCardStroke = Color.rgb(231, 234, 239);
+            colorChip = Color.rgb(242, 244, 247);
+            colorIcon = Color.rgb(58, 64, 74);
+            colorThumbBg = Color.rgb(237, 240, 244);
+            colorWaveUnplayed = Color.rgb(226, 229, 234);
+            colorLyric = Color.rgb(42, 46, 52);
+        }
+    }
+
+    private GradientDrawable roundRect(int fillColor, float radiusDp) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(fillColor);
+        drawable.setCornerRadius(dp((int) radiusDp));
+        return drawable;
+    }
+
+    private GradientDrawable cardDrawable() {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(colorCard);
+        drawable.setCornerRadius(dp(12));
+        drawable.setStroke(dp(1), colorCardStroke);
+        return drawable;
+    }
+
+    private android.graphics.drawable.Drawable lineSeekDrawable() {
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(colorWaveUnplayed);
+        background.setCornerRadius(dp(2));
+        GradientDrawable progress = new GradientDrawable();
+        progress.setColor(colorAccent);
+        progress.setCornerRadius(dp(2));
+        android.graphics.drawable.ClipDrawable clip = new android.graphics.drawable.ClipDrawable(
+                progress, Gravity.START, android.graphics.drawable.ClipDrawable.HORIZONTAL);
+        android.graphics.drawable.LayerDrawable layer =
+                new android.graphics.drawable.LayerDrawable(new android.graphics.drawable.Drawable[]{background, clip});
+        layer.setId(0, android.R.id.background);
+        layer.setId(1, android.R.id.progress);
+        return layer;
     }
 
     private void hideSystemBars() {
@@ -674,12 +740,12 @@ public class MainActivity extends Activity {
 
         urlInput = new EditText(this);
         urlInput.setSingleLine(true);
-        urlInput.setTextColor(Color.WHITE);
-        urlInput.setHintTextColor(Color.rgb(137, 146, 156));
+        urlInput.setTextColor(colorTextPrimary);
+        urlInput.setHintTextColor(colorTextSecondary);
         urlInput.setTextSize(14);
         urlInput.setHint("输入网址，例如 https://example.com");
         urlInput.setPadding(dp(12), 0, dp(12), 0);
-        urlInput.setBackgroundResource(R.drawable.button_icon);
+        urlInput.setBackground(roundRect(colorChip, 12));
         urlRow.addView(urlInput, new LinearLayout.LayoutParams(0, dp(38), 1));
 
         Button goButton = drawerButton("前往");
@@ -700,7 +766,7 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             settings.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         }
-        webView.setBackgroundColor(Color.rgb(24, 27, 32));
+        webView.setBackgroundColor(colorBg);
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public void onPageFinished(WebView view, String url) {
@@ -719,13 +785,13 @@ public class MainActivity extends Activity {
         webParams.topMargin = dp(6);
         area.addView(webView, webParams);
 
-        TextView historyTitle = label("访问记录", 13, Color.rgb(184, 193, 202));
+        TextView historyTitle = label("访问记录", 13, colorTextSecondary);
         LinearLayout.LayoutParams historyTitleParams = new LinearLayout.LayoutParams(-1, dp(22));
         historyTitleParams.topMargin = dp(4);
         area.addView(historyTitle, historyTitleParams);
 
         webHistoryList = new ListView(this);
-        webHistoryList.setDivider(new ColorDrawable(Color.rgb(45, 51, 59)));
+        webHistoryList.setDivider(new ColorDrawable(colorCardStroke));
         webHistoryList.setDividerHeight(1);
         webHistoryList.setCacheColorHint(Color.TRANSPARENT);
         webHistoryList.setBackgroundColor(Color.TRANSPARENT);
@@ -740,9 +806,19 @@ public class MainActivity extends Activity {
         area.setOrientation(LinearLayout.VERTICAL);
         area.setPadding(0, dp(18), 0, dp(12));
 
+        Button themeButton = drawerButton(darkTheme ? "深色主题  开" : "深色主题  关");
+        themeButton.setOnClickListener(v -> {
+            darkTheme = !darkTheme;
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(KEY_DARK_THEME, darkTheme).apply();
+            recreate();
+        });
+        area.addView(themeButton, new LinearLayout.LayoutParams(-1, dp(50)));
+
         Button addFolder = drawerButton("添加文件夹路径");
         addFolder.setOnClickListener(v -> openFolderPicker());
-        area.addView(addFolder, new LinearLayout.LayoutParams(-1, dp(50)));
+        LinearLayout.LayoutParams addParams = new LinearLayout.LayoutParams(-1, dp(50));
+        addParams.topMargin = dp(10);
+        area.addView(addFolder, addParams);
 
         Button rescanButton = drawerButton("重新扫描");
         rescanButton.setOnClickListener(v -> {
@@ -757,7 +833,7 @@ public class MainActivity extends Activity {
         rescanParams.topMargin = dp(10);
         area.addView(rescanButton, rescanParams);
 
-        TextView folderHint = label("支持添加多个文件夹路径，目录内容变化时会自动刷新作品列表。", 13, Color.rgb(160, 169, 178));
+        TextView folderHint = label("支持添加多个文件夹路径，目录内容变化时会自动刷新作品列表。", 13, colorTextSecondary);
         folderHint.setMaxLines(3);
         LinearLayout.LayoutParams folderHintParams = new LinearLayout.LayoutParams(-1, -2);
         folderHintParams.topMargin = dp(8);
@@ -776,7 +852,7 @@ public class MainActivity extends Activity {
         floatingParams.topMargin = dp(10);
         area.addView(floatingLyricsButton, floatingParams);
 
-        TextView hint = label("台词悬浮开启后会显示在手机页面上层，切到后台也会继续播放并更新台词，可拖动调整位置。", 13, Color.rgb(160, 169, 178));
+        TextView hint = label("台词悬浮开启后会显示在手机页面上层，切到后台也会继续播放并更新台词，可拖动调整位置。", 13, colorTextSecondary);
         hint.setMaxLines(4);
         LinearLayout.LayoutParams hintParams = new LinearLayout.LayoutParams(-1, -2);
         hintParams.topMargin = dp(14);
@@ -787,11 +863,11 @@ public class MainActivity extends Activity {
         thanksParams.topMargin = dp(24);
         area.addView(thanksPanel, thanksParams);
 
-        TextView thanksTitle = label("感谢使用白沫播放器", 16, Color.WHITE);
+        TextView thanksTitle = label("感谢使用白沫播放器", 16, colorTextPrimary);
         thanksTitle.setGravity(Gravity.CENTER_VERTICAL);
         thanksPanel.addView(thanksTitle, new LinearLayout.LayoutParams(-1, dp(28)));
 
-        TextView thanksBody = label("欢迎在 GitHub 提出意见、反馈问题或支持项目。你的建议会用于后续功能和体验优化。", 13, Color.rgb(184, 193, 202));
+        TextView thanksBody = label("欢迎在 GitHub 提出意见、反馈问题或支持项目。你的建议会用于后续功能和体验优化。", 13, colorTextSecondary);
         thanksBody.setMaxLines(4);
         LinearLayout.LayoutParams bodyParams = new LinearLayout.LayoutParams(-1, -2);
         bodyParams.topMargin = dp(6);
@@ -834,10 +910,10 @@ public class MainActivity extends Activity {
         settingsDrawer = new LinearLayout(this);
         settingsDrawer.setOrientation(LinearLayout.VERTICAL);
         settingsDrawer.setPadding(dp(18), dp(28), dp(18), dp(18));
-        settingsDrawer.setBackgroundColor(Color.rgb(24, 27, 32));
+        settingsDrawer.setBackgroundColor(colorBg);
         settingsDrawer.setVisibility(View.GONE);
 
-        TextView title = label("设置", 20, Color.WHITE);
+        TextView title = label("设置", 20, colorTextPrimary);
         title.setGravity(Gravity.CENTER_VERTICAL);
         settingsDrawer.addView(title, new LinearLayout.LayoutParams(-1, dp(44)));
 
@@ -856,7 +932,7 @@ public class MainActivity extends Activity {
         floatingParams.topMargin = dp(10);
         settingsDrawer.addView(floatingLyricsButton, floatingParams);
 
-        TextView hint = label("开启后台词会显示在手机页面上层，可拖动位置。", 12, Color.rgb(160, 169, 178));
+        TextView hint = label("开启后台词会显示在手机页面上层，可拖动位置。", 12, colorTextSecondary);
         hint.setMaxLines(3);
         LinearLayout.LayoutParams hintParams = new LinearLayout.LayoutParams(-1, -2);
         hintParams.topMargin = dp(12);
@@ -870,7 +946,10 @@ public class MainActivity extends Activity {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(12), dp(10), dp(12), dp(10));
-        panel.setBackgroundResource(R.drawable.panel);
+        GradientDrawable drawable = cardDrawable();
+        drawable.setCornerRadius(dp(16));
+        panel.setBackground(drawable);
+        panel.setElevation(dp(2));
         return panel;
     }
 
@@ -886,12 +965,12 @@ public class MainActivity extends Activity {
     private Button drawerButton(String text) {
         Button button = new Button(this);
         button.setText(text);
-        button.setTextColor(Color.WHITE);
+        button.setTextColor(colorTextPrimary);
         button.setTextSize(15);
         button.setAllCaps(false);
         button.setGravity(Gravity.CENTER_VERTICAL);
         button.setPadding(dp(14), 0, dp(14), 0);
-        button.setBackgroundResource(R.drawable.button_icon);
+        button.setBackground(roundRect(colorChip, 12));
         return button;
     }
 
@@ -927,8 +1006,10 @@ public class MainActivity extends Activity {
     private ImageButton iconButton(String text, View.OnClickListener listener) {
         ImageButton button = new ImageButton(this);
         button.setContentDescription(text);
-        button.setBackgroundResource(R.drawable.button_icon);
-        button.setImageDrawable(new TextDrawable(text));
+        button.setBackgroundColor(Color.TRANSPARENT);
+        TextDrawable drawable = new TextDrawable(text);
+        drawable.setColor(colorIcon);
+        button.setImageDrawable(drawable);
         button.setOnClickListener(listener);
         return button;
     }
@@ -1357,7 +1438,7 @@ public class MainActivity extends Activity {
         }
         rootListContainer.removeAllViews();
         if (roots.isEmpty()) {
-            TextView empty = label("尚未添加文件夹路径", 13, Color.rgb(160, 169, 178));
+            TextView empty = label("尚未添加文件夹路径", 13, colorTextSecondary);
             rootListContainer.addView(empty, new LinearLayout.LayoutParams(-1, dp(34)));
             return;
         }
@@ -1367,8 +1448,8 @@ public class MainActivity extends Activity {
             LinearLayout row = new LinearLayout(this);
             row.setOrientation(LinearLayout.HORIZONTAL);
             row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setBackgroundResource(R.drawable.list_card);
-            TextView name = label(root.name, 14, Color.rgb(24, 28, 40));
+            row.setBackground(cardDrawable());
+            TextView name = label(root.name, 14, colorTextPrimary);
             name.setSingleLine(true);
             name.setEllipsize(TextUtils.TruncateAt.END);
             name.setPadding(dp(10), 0, dp(6), 0);
@@ -1470,7 +1551,9 @@ public class MainActivity extends Activity {
         chip.setMinimumWidth(0);
         chip.setSingleLine(true);
         chip.setPadding(dp(14), 0, dp(14), 0);
-        chip.setBackgroundResource(R.drawable.mini_pill);
+        GradientDrawable chipBg = roundRect(colorChip, 16);
+        chipBg.setStroke(dp(1), colorCardStroke);
+        chip.setBackground(chipBg);
         chip.setOnClickListener(v -> setFilter(index));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, dp(32));
         if (filterChipRow.getChildCount() > 0) {
@@ -1486,7 +1569,7 @@ public class MainActivity extends Activity {
         for (int i = 0; i < filterChipRow.getChildCount(); i++) {
             Button chip = (Button) filterChipRow.getChildAt(i);
             boolean active = (i == 0 && filterRootIndex < 0) || (i > 0 && filterRootIndex == i - 1);
-            chip.setTextColor(active ? Color.rgb(18, 24, 38) : Color.rgb(124, 132, 144));
+            chip.setTextColor(active ? colorAccent : colorTextSecondary);
             chip.setTextSize(active ? 14 : 13);
         }
     }
@@ -2120,6 +2203,11 @@ public class MainActivity extends Activity {
             showCurrentTrackImage();
         }
         updateMiniPlayer();
+        playerArea.setTranslationY(dp(150));
+        playerArea.setAlpha(0f);
+        playerArea.animate().translationY(0f).alpha(1f).setDuration(260)
+                .setInterpolator(new android.view.animation.DecelerateInterpolator())
+                .start();
     }
 
     private void showLyrics() {
@@ -2146,12 +2234,137 @@ public class MainActivity extends Activity {
             return;
         }
         if (pageMode == PAGE_PLAYER) {
-            showTracks();
+            collapsePlayerToPlaylist();
         } else if (pageMode == PAGE_LYRICS) {
             showPlayer();
         } else if (pageMode == PAGE_TRACKS) {
             showWorks();
         }
+    }
+
+    private void collapsePlayerToPlaylist() {
+        if (pageMode != PAGE_PLAYER || playerArea == null) {
+            return;
+        }
+        playerArea.animate().cancel();
+        playerArea.animate().translationY(playerArea.getHeight()).alpha(0f).setDuration(240)
+                .setInterpolator(new android.view.animation.AccelerateInterpolator())
+                .withEndAction(() -> {
+                    playerArea.setTranslationY(0f);
+                    playerArea.setAlpha(1f);
+                    showTracks();
+                    if (miniPlayer != null && miniPlayer.getVisibility() == View.VISIBLE) {
+                        miniPlayer.setTranslationY(dp(70));
+                        miniPlayer.animate().translationY(0f).setDuration(200).start();
+                    }
+                }).start();
+    }
+
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent event) {
+        if (pageMode == PAGE_PLAYER && playerArea != null && playerArea.getVisibility() == View.VISIBLE
+                && (viewerOverlay == null || viewerOverlay.getVisibility() != View.VISIBLE)) {
+            int action = event.getActionMasked();
+            if (action == MotionEvent.ACTION_DOWN) {
+                playerCollapseDownX = event.getRawX();
+                playerCollapseDownY = event.getRawY();
+                playerCollapseIntent = false;
+                if (collapseVelocityTracker != null) {
+                    collapseVelocityTracker.clear();
+                } else {
+                    collapseVelocityTracker = VelocityTracker.obtain();
+                }
+                collapseVelocityTracker.addMovement(event);
+            } else if (collapseVelocityTracker != null) {
+                collapseVelocityTracker.addMovement(event);
+            }
+            if (action == MotionEvent.ACTION_MOVE && !playerCollapseIntent) {
+                float dx = event.getRawX() - playerCollapseDownX;
+                float dy = event.getRawY() - playerCollapseDownY;
+                if (dy > dp(26) && dy > Math.abs(dx) * 1.2f) {
+                    playerCollapseIntent = true;
+                    resetImageTouchState();
+                }
+            }
+            if (playerCollapseIntent) {
+                if (action == MotionEvent.ACTION_MOVE) {
+                    float dy = Math.max(0f, event.getRawY() - playerCollapseDownY);
+                    playerArea.animate().cancel();
+                    playerArea.setTranslationY(dy * 0.9f);
+                    return true;
+                }
+                if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                    float velocityY = 0f;
+                    if (collapseVelocityTracker != null) {
+                        collapseVelocityTracker.computeCurrentVelocity(1000);
+                        velocityY = collapseVelocityTracker.getYVelocity();
+                        collapseVelocityTracker.recycle();
+                        collapseVelocityTracker = null;
+                    }
+                    playerCollapseIntent = false;
+                    float dy = Math.max(0f, event.getRawY() - playerCollapseDownY);
+                    if (dy > playerArea.getHeight() * 0.22f || velocityY > dp(1400)) {
+                        collapsePlayerToPlaylist();
+                    } else {
+                        playerArea.animate().translationY(0f).alpha(1f).setDuration(180).start();
+                    }
+                    return true;
+                }
+            } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                if (collapseVelocityTracker != null) {
+                    collapseVelocityTracker.recycle();
+                    collapseVelocityTracker = null;
+                }
+            }
+        }
+        return super.dispatchTouchEvent(event);
+    }
+
+    private void resetImageTouchState() {
+        if (imageVelocityTracker != null) {
+            imageVelocityTracker.recycle();
+            imageVelocityTracker = null;
+        }
+        imageDragging = false;
+        imageHorizontalIntent = false;
+        if (coverView != null && !imageSwitching) {
+            coverView.setTranslationX(0f);
+        }
+    }
+
+    private boolean handleWaveformTouch(MotionEvent event) {
+        if (player == null) {
+            return true;
+        }
+        int width = waveform.getWidth();
+        int duration;
+        try {
+            duration = player.getDuration();
+        } catch (IllegalStateException ex) {
+            return true;
+        }
+        if (width <= 0 || duration <= 0) {
+            return true;
+        }
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_MOVE) {
+            userSeeking = true;
+            float fraction = Math.max(0f, Math.min(1f, event.getX() / (float) width));
+            int target = (int) (fraction * duration);
+            waveform.setPosition(target, duration);
+            timeView.setText(formatTime(target) + " / " + formatTime(duration));
+            return true;
+        }
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            float fraction = Math.max(0f, Math.min(1f, event.getX() / (float) width));
+            int target = (int) (fraction * duration);
+            player.seekTo(target);
+            waveform.setPosition(target, duration);
+            timeView.setText(formatTime(target) + " / " + formatTime(duration));
+            userSeeking = false;
+            return true;
+        }
+        return true;
     }
 
     private void showMainTab(int tab) {
@@ -2225,7 +2438,7 @@ public class MainActivity extends Activity {
         if (button == null) {
             return;
         }
-        button.setTextColor(active ? Color.rgb(18, 24, 38) : Color.rgb(124, 132, 144));
+        button.setTextColor(active ? colorAccent : colorTextSecondary);
         button.setBackgroundColor(Color.TRANSPARENT);
         button.setTextSize(active ? 15 : 13);
     }
@@ -2235,7 +2448,9 @@ public class MainActivity extends Activity {
         boolean playerVisible = myTab && pageMode == PAGE_PLAYER;
         boolean lyricsVisible = myTab && pageMode == PAGE_LYRICS;
         boolean listVisible = myTab && (pageMode == PAGE_WORKS || pageMode == PAGE_TRACKS);
-        backButton.setVisibility(myTab && pageMode != PAGE_WORKS ? View.VISIBLE : View.GONE);
+        if (!playerVisible && coverTopThumb != null) {
+            coverTopThumb.setVisibility(View.GONE);
+        }
         playerArea.setVisibility(playerVisible ? View.VISIBLE : View.GONE);
         browserList.setVisibility(listVisible ? View.VISIBLE : View.GONE);
         filterBar.setVisibility(listVisible && pageMode == PAGE_WORKS && roots.size() > 1 ? View.VISIBLE : View.GONE);
@@ -2306,8 +2521,10 @@ public class MainActivity extends Activity {
         try {
             player.setDataSource(this, item.audio.uri);
             player.setOnPreparedListener(mp -> {
-                seekBar.setMax(mp.getDuration());
-                timeView.setText("00:00 / " + formatTime(mp.getDuration()));
+                int duration = mp.getDuration();
+                waveform.setDuration(duration);
+                timeView.setText("00:00 / " + formatTime(duration));
+                waveform.setPosition(0, duration);
                 mp.start();
                 playButton.setText(ICON_PAUSE);
                 miniPlayButton.setText(ICON_PAUSE);
@@ -2390,8 +2607,7 @@ public class MainActivity extends Activity {
             int position = player.getCurrentPosition();
             int duration = player.getDuration();
             if (!userSeeking) {
-                seekBar.setMax(duration);
-                seekBar.setProgress(position);
+                waveform.setPosition(position, duration);
             }
             timeView.setText(formatTime(position) + " / " + formatTime(duration));
             miniSeekBar.setMax(duration);
@@ -2577,8 +2793,10 @@ public class MainActivity extends Activity {
         lyricView.setText("");
         updateFloatingLyricText();
         currentImageIndex = 0;
-        seekBar.setProgress(0);
-        seekBar.setMax(0);
+        if (waveform != null) {
+            waveform.setPosition(0, 0);
+            waveform.setDuration(0);
+        }
         miniSeekBar.setProgress(0);
         miniSeekBar.setMax(0);
         miniTimeView.setText("00:00 / 00:00");
@@ -2612,6 +2830,7 @@ public class MainActivity extends Activity {
             return;
         }
         miniTitleView.setText(item.audio.name);
+        loadCoverInto(miniCoverThumb, playbackWork != null ? playbackWork.cover : null);
         boolean playing = false;
         try {
             playing = player.isPlaying();
@@ -2645,18 +2864,131 @@ public class MainActivity extends Activity {
         }
         FileDoc cover = playbackWork != null ? playbackWork.cover : (item.images.isEmpty() ? null : item.images.get(0));
         boolean showThumb = currentImageIndex > 0 && cover != null;
-        coverTopThumb.setVisibility(showThumb ? View.VISIBLE : View.GONE);
         if (showThumb) {
-            loadCoverInto(coverTopThumb, cover);
+            coverTopThumb.setVisibility(View.VISIBLE);
+            if (!coverRelocationInFlight) {
+                loadCoverInto(coverTopThumb, cover);
+            }
+        } else {
+            coverTopThumb.setVisibility(View.GONE);
         }
-        LinearLayout.LayoutParams titleParams = (LinearLayout.LayoutParams) titleView.getLayoutParams();
-        titleParams.leftMargin = showThumb ? dp(10) : 0;
-        titleView.setLayoutParams(titleParams);
         if (item.images.size() > 1) {
             imageIndicator.setVisibility(View.VISIBLE);
             imageIndexText.setText((currentImageIndex + 1) + " / " + item.images.size());
         } else {
             imageIndicator.setVisibility(View.GONE);
+        }
+    }
+
+    private boolean coverRelocationInFlight;
+
+    private void animateCoverRelocationIfNeeded(int prevIndex, int newIndex) {
+        if (prevIndex == newIndex) {
+            return;
+        }
+        MediaItem item = currentPlaybackItem();
+        if (item == null) {
+            return;
+        }
+        FileDoc cover = playbackWork != null && playbackWork.cover != null
+                ? playbackWork.cover
+                : (!item.images.isEmpty() ? item.images.get(0) : null);
+        if (cover == null) {
+            return;
+        }
+        if (prevIndex == 0 && newIndex > 0) {
+            relocateCoverOverlay(cover, true);
+        } else if (prevIndex > 0 && newIndex == 0) {
+            relocateCoverOverlay(cover, false);
+        }
+    }
+
+    private int[] rectOnRoot(View view, int[] rootLoc) {
+        int[] loc = new int[2];
+        view.getLocationOnScreen(loc);
+        return new int[]{
+                loc[0] - rootLoc[0] - Math.round(view.getTranslationX()),
+                loc[1] - rootLoc[1] - Math.round(view.getTranslationY())
+        };
+    }
+
+    private void relocateCoverOverlay(FileDoc cover, boolean toThumb) {
+        final ImageView overlay = new ImageView(this);
+        overlay.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        Bitmap cached = coverCache.get(cover.uri.toString());
+        if (cached == null) {
+            cached = decodeThumbnail(cover.uri, dp(72));
+            if (cached != null) {
+                coverCache.put(cover.uri.toString(), cached);
+            }
+        }
+        if (cached != null) {
+            overlay.setImageBitmap(cached);
+        } else {
+            overlay.setImageDrawable(workPlaceholder);
+        }
+
+        coverRelocationInFlight = true;
+        if (toThumb) {
+            coverTopThumb.setVisibility(View.VISIBLE);
+            coverTopThumb.setAlpha(0f);
+        }
+
+        final int[] rootLoc = new int[2];
+        rootLayout.getLocationOnScreen(rootLoc);
+        coverTopThumb.post(() -> {
+            int[] fromRect;
+            int[] toRect;
+            if (toThumb) {
+                fromRect = rectOnRoot(coverView, rootLoc);
+                toRect = rectOnRoot(coverTopThumb, rootLoc);
+            } else {
+                fromRect = rectOnRoot(coverTopThumb, rootLoc);
+                toRect = rectOnRoot(coverView, rootLoc);
+                coverTopThumb.setVisibility(View.GONE);
+            }
+            int srcW = toThumb ? coverView.getWidth() : coverTopThumb.getWidth();
+            int srcH = toThumb ? coverView.getHeight() : coverTopThumb.getHeight();
+            int dstW = toThumb ? coverTopThumb.getWidth() : coverView.getWidth();
+            int dstH = toThumb ? coverTopThumb.getHeight() : coverView.getHeight();
+            if (srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0) {
+                finishCoverRelocation(toThumb);
+                rootLayout.removeView(overlay);
+                return;
+            }
+            FrameLayout.LayoutParams overlayParams =
+                    new FrameLayout.LayoutParams(srcW, srcH, Gravity.TOP | Gravity.START);
+            overlay.setTranslationX(fromRect[0]);
+            overlay.setTranslationY(fromRect[1]);
+            overlay.setPivotX(0f);
+            overlay.setPivotY(0f);
+            overlay.setScaleX(1f);
+            overlay.setScaleY(1f);
+            rootLayout.addView(overlay, overlayParams);
+            overlay.bringToFront();
+            overlay.animate().translationX(toRect[0]).translationY(toRect[1])
+                    .scaleX(dstW / (float) srcW).scaleY(dstH / (float) srcH)
+                    .setDuration(320)
+                    .setInterpolator(new android.view.animation.DecelerateInterpolator())
+                    .withEndAction(() -> {
+                        finishCoverRelocation(toThumb);
+                        rootLayout.removeView(overlay);
+                    }).start();
+        });
+    }
+
+    private void finishCoverRelocation(boolean toThumb) {
+        coverRelocationInFlight = false;
+        coverTopThumb.setAlpha(1f);
+        if (toThumb) {
+            MediaItem item = currentPlaybackItem();
+            FileDoc cover = null;
+            if (item != null) {
+                cover = playbackWork != null && playbackWork.cover != null
+                        ? playbackWork.cover
+                        : (!item.images.isEmpty() ? item.images.get(0) : null);
+            }
+            loadCoverInto(coverTopThumb, cover);
         }
     }
 
@@ -2695,10 +3027,7 @@ public class MainActivity extends Activity {
             }
             if (imageHorizontalIntent) {
                 imageDragging = true;
-                float translation = imageDragBase + dx;
-                float width = Math.max(dp(80), coverView.getWidth());
-                coverView.setTranslationX(translation);
-                coverView.setAlpha(Math.max(0.45f, 1f - Math.abs(translation) / width * 0.55f));
+                coverView.setTranslationX(imageDragBase + dx);
             }
             return;
         }
@@ -2749,14 +3078,16 @@ public class MainActivity extends Activity {
         float startX = coverView.getTranslationX();
         float outX = -dir * width;
         long outDuration = Math.max(90, (long) (220 * Math.abs(startX - outX) / width));
-        coverView.animate().translationX(outX).alpha(0.12f).setDuration(outDuration).withEndAction(() -> {
+        coverView.animate().translationX(outX).setDuration(outDuration).withEndAction(() -> {
             if (gen != imageAnimGeneration) {
                 return;
             }
+            int prev = currentImageIndex;
             currentImageIndex = target;
+            animateCoverRelocationIfNeeded(prev, target);
             showCurrentTrackImage();
             coverView.setTranslationX(dir * width);
-            coverView.animate().translationX(0f).alpha(1f).setDuration(200).withEndAction(() -> {
+            coverView.animate().translationX(0f).setDuration(200).withEndAction(() -> {
                 if (gen == imageAnimGeneration) {
                     imageSwitching = false;
                 }
@@ -2768,7 +3099,7 @@ public class MainActivity extends Activity {
         imageAnimGeneration++;
         final int gen = imageAnimGeneration;
         imageSwitching = true;
-        coverView.animate().translationX(0f).alpha(1f).setDuration(180).withEndAction(() -> {
+        coverView.animate().translationX(0f).setDuration(180).withEndAction(() -> {
             if (gen == imageAnimGeneration) {
                 imageSwitching = false;
             }
@@ -2790,7 +3121,7 @@ public class MainActivity extends Activity {
     private Button miniIndicatorButton(String text, int direction) {
         Button button = new Button(this);
         button.setText(text);
-        button.setTextColor(Color.rgb(96, 100, 106));
+        button.setTextColor(colorTextSecondary);
         button.setTextSize(13);
         button.setAllCaps(false);
         button.setBackgroundColor(Color.TRANSPARENT);
@@ -3097,6 +3428,56 @@ public class MainActivity extends Activity {
         }
     }
 
+    private class WaveformView extends View {
+        private static final int BAR_COUNT = 96;
+        private final android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private int durationMs;
+        private int positionMs;
+
+        WaveformView(Context context) {
+            super(context);
+        }
+
+        void setDuration(int ms) {
+            durationMs = Math.max(0, ms);
+            invalidate();
+        }
+
+        void setPosition(int ms, int duration) {
+            positionMs = Math.max(0, ms);
+            if (duration > 0) {
+                durationMs = duration;
+            }
+            invalidate();
+        }
+
+        private float barHeightFraction(int index) {
+            double v = Math.abs(Math.sin(index * 12.9898 + 4.1414)) * 0.72
+                    + Math.abs(Math.sin(index * 3.71 + 1.37)) * 0.28;
+            return 0.16f + (float) v * 0.84f;
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            float width = getWidth();
+            float height = getHeight();
+            if (width <= 0 || height <= 0) {
+                return;
+            }
+            float slot = width / BAR_COUNT;
+            float barWidth = Math.max(dp(2), slot * 0.42f);
+            float fraction = durationMs > 0 ? Math.min(1f, positionMs / (float) durationMs) : 0f;
+            for (int i = 0; i < BAR_COUNT; i++) {
+                float barHeight = height * 0.94f * barHeightFraction(i);
+                float left = i * slot + (slot - barWidth) / 2f;
+                float top = (height - barHeight) / 2f;
+                paint.setColor(i / (float) BAR_COUNT < fraction ? colorAccent : colorWaveUnplayed);
+                canvas.drawRect(left, top, left + barWidth, top + barHeight, paint);
+            }
+        }
+    }
+
     private boolean isSupportedAsset(String name) {
         return isAudio(name) || isImage(name.toLowerCase(Locale.ROOT)) || name.toLowerCase(Locale.ROOT).endsWith(".vtt");
     }
@@ -3278,12 +3659,15 @@ public class MainActivity extends Activity {
                 row.setGravity(Gravity.CENTER_VERTICAL);
                 row.setPadding(dp(10), dp(8), dp(10), dp(8));
                 row.setMinimumHeight(dp(88));
-                row.setBackgroundResource(R.drawable.list_card);
+                GradientDrawable rowBg = cardDrawable();
+                rowBg.setCornerRadius(dp(14));
+                row.setBackground(rowBg);
+                row.setElevation(dp(2));
 
                 holder = new WorkRowHolder();
                 holder.thumb = new ImageView(MainActivity.this);
                 holder.thumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
-                holder.thumb.setBackgroundColor(Color.rgb(226, 232, 238));
+                holder.thumb.setBackgroundColor(colorThumbBg);
                 row.addView(holder.thumb, new LinearLayout.LayoutParams(dp(72), dp(72)));
 
                 LinearLayout texts = new LinearLayout(MainActivity.this);
@@ -3292,12 +3676,12 @@ public class MainActivity extends Activity {
                 texts.setPadding(dp(12), 0, 0, 0);
                 row.addView(texts, new LinearLayout.LayoutParams(0, -1, 1));
 
-                holder.title = label("", 16, Color.rgb(24, 28, 40));
+                holder.title = label("", 16, colorTextPrimary);
                 holder.title.setSingleLine(true);
                 holder.title.setEllipsize(TextUtils.TruncateAt.END);
                 texts.addView(holder.title, new LinearLayout.LayoutParams(-1, 0, 1));
 
-                holder.subtitle = label("", 13, Color.rgb(118, 127, 139));
+                holder.subtitle = label("", 13, colorTextSecondary);
                 holder.subtitle.setSingleLine(true);
                 holder.subtitle.setEllipsize(TextUtils.TruncateAt.END);
                 texts.addView(holder.subtitle, new LinearLayout.LayoutParams(-1, 0, 1));
@@ -3307,11 +3691,11 @@ public class MainActivity extends Activity {
             loadCoverInto(holder.thumb, work.cover);
             boolean moving = position == movingWorkIndex;
             holder.title.setText(work.name);
-            holder.title.setTextColor(moving ? Color.rgb(163, 111, 28) : Color.rgb(24, 28, 40));
+            holder.title.setTextColor(moving ? colorAccent : colorTextPrimary);
             String coverState = work.cover == null ? "无封面" : "有封面";
             String subtitle = moving ? "拖动中 · 松开保存位置" : work.tracks.size() + " 首音轨 · " + coverState;
             holder.subtitle.setText(subtitle);
-            holder.subtitle.setTextColor(moving ? Color.rgb(163, 111, 28) : Color.rgb(118, 127, 139));
+            holder.subtitle.setTextColor(moving ? colorAccent : colorTextSecondary);
             return row;
         }
 
@@ -3327,15 +3711,18 @@ public class MainActivity extends Activity {
                 row.setGravity(Gravity.CENTER_VERTICAL);
                 row.setPadding(dp(12), dp(8), dp(12), dp(8));
                 row.setMinimumHeight(dp(58));
-                row.setBackgroundResource(R.drawable.list_card);
+                GradientDrawable rowBg = cardDrawable();
+                rowBg.setCornerRadius(dp(14));
+                row.setBackground(rowBg);
+                row.setElevation(dp(2));
 
                 holder = new TrackRowHolder();
-                holder.title = label("", 15, Color.rgb(24, 28, 40));
+                holder.title = label("", 15, colorTextPrimary);
                 holder.title.setSingleLine(true);
                 holder.title.setEllipsize(TextUtils.TruncateAt.END);
                 row.addView(holder.title, new LinearLayout.LayoutParams(-1, 0, 1));
 
-                holder.subtitle = label("", 12, Color.rgb(118, 127, 139));
+                holder.subtitle = label("", 12, colorTextSecondary);
                 holder.subtitle.setSingleLine(true);
                 holder.subtitle.setEllipsize(TextUtils.TruncateAt.END);
                 row.addView(holder.subtitle, new LinearLayout.LayoutParams(-1, 0, 1));
@@ -3346,8 +3733,8 @@ public class MainActivity extends Activity {
             boolean sameWork = playbackWork != null && activeWork != null && playbackWork.key.equals(activeWork.key);
             boolean isCurrent = sameWork && current != null && current.key.equals(item.key);
             int titleColor = position == movingTrackIndex
-                    ? Color.rgb(163, 111, 28)
-                    : (isCurrent ? Color.rgb(69, 128, 99) : Color.rgb(24, 28, 40));
+                    ? colorAccent
+                    : (isCurrent ? colorAccent : colorTextPrimary);
             holder.title.setText(item.audio.name);
             holder.title.setTextColor(titleColor);
 
@@ -3355,7 +3742,7 @@ public class MainActivity extends Activity {
                     ? "拖动中 · 松开保存位置"
                     : (item.vtt == null ? "无字幕" : "VTT") + " · " + item.audio.parentPath;
             holder.subtitle.setText(subtitle);
-            holder.subtitle.setTextColor(position == movingTrackIndex ? Color.rgb(163, 111, 28) : Color.rgb(118, 127, 139));
+            holder.subtitle.setTextColor(position == movingTrackIndex ? colorAccent : colorTextSecondary);
             return row;
         }
     }
@@ -3395,13 +3782,15 @@ public class MainActivity extends Activity {
             row.setGravity(Gravity.CENTER_VERTICAL);
             row.setPadding(dp(12), dp(10), dp(12), dp(10));
             row.setMinimumHeight(dp(72));
-            row.setBackgroundResource(R.drawable.list_card);
+            GradientDrawable rowBg = cardDrawable();
+            rowBg.setCornerRadius(dp(14));
+            row.setBackground(rowBg);
 
             boolean active = position == currentCueIndex;
-            TextView time = label(formatTime((int) cue.startMs), 12, active ? Color.rgb(69, 128, 99) : Color.rgb(118, 127, 139));
+            TextView time = label(formatTime((int) cue.startMs), 12, active ? colorAccent : colorTextSecondary);
             row.addView(time, new LinearLayout.LayoutParams(-1, dp(22)));
 
-            TextView text = label(cue.text, active ? 17 : 15, active ? Color.rgb(24, 28, 40) : Color.rgb(78, 86, 98));
+            TextView text = label(cue.text, active ? 17 : 15, active ? colorTextPrimary : colorTextSecondary);
             text.setGravity(Gravity.CENTER_VERTICAL);
             text.setMaxLines(4);
             text.setEllipsize(TextUtils.TruncateAt.END);
@@ -3438,12 +3827,14 @@ public class MainActivity extends Activity {
 
         @Override
         public View getView(int position, View convertView, ViewGroup parent) {
-            TextView row = label(webHistory.get(position), 13, Color.rgb(54, 63, 76));
+            TextView row = label(webHistory.get(position), 13, colorTextPrimary);
             row.setSingleLine(true);
             row.setEllipsize(TextUtils.TruncateAt.END);
             row.setPadding(dp(10), 0, dp(10), 0);
             row.setMinimumHeight(dp(44));
-            row.setBackgroundResource(R.drawable.list_card);
+            GradientDrawable rowBg = cardDrawable();
+            rowBg.setCornerRadius(dp(10));
+            row.setBackground(rowBg);
             return row;
         }
     }
@@ -3472,14 +3863,17 @@ public class MainActivity extends Activity {
             row.setGravity(Gravity.CENTER_VERTICAL);
             row.setPadding(dp(12), dp(8), dp(12), dp(8));
             row.setMinimumHeight(dp(68));
-            row.setBackgroundResource(R.drawable.list_card);
+            GradientDrawable rowBg = cardDrawable();
+            rowBg.setCornerRadius(dp(14));
+            row.setBackground(rowBg);
+            row.setElevation(dp(2));
 
-            TextView title = label(recent.trackName, 15, Color.rgb(24, 28, 40));
+            TextView title = label(recent.trackName, 15, colorTextPrimary);
             title.setSingleLine(true);
             title.setEllipsize(TextUtils.TruncateAt.END);
             row.addView(title, new LinearLayout.LayoutParams(-1, 0, 1));
 
-            TextView sub = label(TextUtils.isEmpty(recent.workName) ? "未知作品" : recent.workName, 12, Color.rgb(118, 127, 139));
+            TextView sub = label(TextUtils.isEmpty(recent.workName) ? "未知作品" : recent.workName, 12, colorTextSecondary);
             sub.setSingleLine(true);
             sub.setEllipsize(TextUtils.TruncateAt.END);
             row.addView(sub, new LinearLayout.LayoutParams(-1, 0, 1));
@@ -3701,6 +4095,11 @@ public class MainActivity extends Activity {
             paint.setColor(Color.WHITE);
             paint.setTextAlign(android.graphics.Paint.Align.CENTER);
             paint.setFakeBoldText(true);
+        }
+
+        void setColor(int color) {
+            paint.setColor(color);
+            invalidateSelf();
         }
 
         @Override

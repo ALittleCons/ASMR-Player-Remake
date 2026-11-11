@@ -27,6 +27,7 @@ import android.view.Gravity;
 import android.view.GestureDetector;
 import android.view.MotionEvent;
 import android.view.ScaleGestureDetector;
+import android.view.VelocityTracker;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -176,6 +177,13 @@ public class MainActivity extends Activity {
     private TextView imageIndexText;
     private GestureDetector playerImageGesture;
     private boolean imageSwitching;
+    private boolean imageDragging;
+    private boolean imageHorizontalIntent;
+    private float imageDownX;
+    private float imageDownY;
+    private float imageDragBase;
+    private int imageAnimGeneration;
+    private VelocityTracker imageVelocityTracker;
     private FrameLayout viewerOverlay;
     private ZoomImageView viewerImage;
     private TextView viewerIndexLabel;
@@ -370,43 +378,31 @@ public class MainActivity extends Activity {
                 openImageViewer();
                 return true;
             }
-
-            @Override
-            public boolean onFling(MotionEvent event1, MotionEvent event2, float velocityX, float velocityY) {
-                if (Math.abs(velocityX) > Math.abs(velocityY) * 1.2f && Math.abs(velocityX) > 600f) {
-                    switchPlayerImage(velocityX < 0 ? 1 : -1);
-                    return true;
-                }
-                return false;
-            }
         });
         coverView.setOnTouchListener((view, event) -> {
             playerImageGesture.onTouchEvent(event);
+            handleImageTouch(event);
             return true;
         });
-
-        FrameLayout imageHolder = new FrameLayout(this);
-        imageHolder.addView(coverView, new FrameLayout.LayoutParams(-1, -1));
+        LinearLayout.LayoutParams coverParams = new LinearLayout.LayoutParams(-1, 0);
+        coverParams.weight = 1f;
+        coverParams.topMargin = dp(8);
+        playerArea.addView(coverView, coverParams);
 
         imageIndicator = new LinearLayout(this);
         imageIndicator.setOrientation(LinearLayout.HORIZONTAL);
         imageIndicator.setGravity(Gravity.CENTER);
-        imageIndicator.setBackgroundColor(Color.argb(150, 0, 0, 0));
         imageIndicator.setVisibility(View.GONE);
-        imageIndicator.addView(miniIndicatorButton("‹", -1), new LinearLayout.LayoutParams(dp(44), -1));
-        imageIndexText = label("", 12, Color.WHITE);
+        imageIndicator.addView(miniIndicatorButton("‹", -1), new LinearLayout.LayoutParams(dp(34), -1));
+        imageIndexText = label("", 11, Color.rgb(96, 100, 106));
         imageIndexText.setGravity(Gravity.CENTER);
-        imageIndexText.setMinWidth(dp(48));
+        imageIndexText.setMinWidth(dp(42));
         imageIndicator.addView(imageIndexText, new LinearLayout.LayoutParams(-2, -1));
-        imageIndicator.addView(miniIndicatorButton("›", 1), new LinearLayout.LayoutParams(dp(44), -1));
-        FrameLayout.LayoutParams indicatorParams = new FrameLayout.LayoutParams(-2, dp(30), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        indicatorParams.bottomMargin = dp(10);
-        imageHolder.addView(imageIndicator, indicatorParams);
-
-        LinearLayout.LayoutParams coverParams = new LinearLayout.LayoutParams(-1, 0);
-        coverParams.weight = 1f;
-        coverParams.topMargin = dp(10);
-        playerArea.addView(imageHolder, coverParams);
+        imageIndicator.addView(miniIndicatorButton("›", 1), new LinearLayout.LayoutParams(dp(34), -1));
+        LinearLayout.LayoutParams indicatorRowParams = new LinearLayout.LayoutParams(-2, dp(22));
+        indicatorRowParams.gravity = Gravity.CENTER_HORIZONTAL;
+        indicatorRowParams.topMargin = dp(2);
+        playerArea.addView(imageIndicator, indicatorRowParams);
 
         LinearLayout infoPanel = panel();
         LinearLayout.LayoutParams infoParams = new LinearLayout.LayoutParams(-1, dp(132));
@@ -2299,6 +2295,8 @@ public class MainActivity extends Activity {
         coverView.setTranslationX(0f);
         coverView.setAlpha(1f);
         imageSwitching = false;
+        imageDragging = false;
+        imageAnimGeneration++;
         showCurrentTrackImage();
         loadCues(item.vtt);
         currentCueIndex = -1;
@@ -2571,6 +2569,8 @@ public class MainActivity extends Activity {
         coverView.setTranslationX(0f);
         coverView.setAlpha(1f);
         imageSwitching = false;
+        imageDragging = false;
+        imageAnimGeneration++;
         if (coverTopThumb != null) {
             coverTopThumb.setVisibility(View.GONE);
         }
@@ -2660,32 +2660,138 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void handleImageTouch(MotionEvent event) {
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) {
+            if (imageVelocityTracker != null) {
+                imageVelocityTracker.clear();
+            } else {
+                imageVelocityTracker = VelocityTracker.obtain();
+            }
+            imageVelocityTracker.addMovement(event);
+            imageDownX = event.getRawX();
+            imageDownY = event.getRawY();
+            imageHorizontalIntent = false;
+            if (imageSwitching) {
+                coverView.animate().cancel();
+                imageSwitching = false;
+                imageAnimGeneration++;
+            }
+            imageDragBase = coverView.getTranslationX();
+            coverView.setAlpha(1f);
+            return;
+        }
+        if (imageVelocityTracker != null) {
+            imageVelocityTracker.addMovement(event);
+        }
+        MediaItem item = currentPlaybackItem();
+        boolean canSwipe = pageMode == PAGE_PLAYER && item != null && item.images.size() > 1;
+        if (action == MotionEvent.ACTION_MOVE) {
+            float dx = event.getRawX() - imageDownX;
+            float dy = event.getRawY() - imageDownY;
+            if (!imageHorizontalIntent && canSwipe
+                    && Math.abs(dx) > dp(14) && Math.abs(dx) > Math.abs(dy) * 1.1f) {
+                imageHorizontalIntent = true;
+            }
+            if (imageHorizontalIntent) {
+                imageDragging = true;
+                float translation = imageDragBase + dx;
+                float width = Math.max(dp(80), coverView.getWidth());
+                coverView.setTranslationX(translation);
+                coverView.setAlpha(Math.max(0.45f, 1f - Math.abs(translation) / width * 0.55f));
+            }
+            return;
+        }
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            float velocityX = 0f;
+            if (imageVelocityTracker != null) {
+                imageVelocityTracker.computeCurrentVelocity(1000);
+                velocityX = imageVelocityTracker.getXVelocity();
+                imageVelocityTracker.recycle();
+                imageVelocityTracker = null;
+            }
+            if (imageDragging) {
+                imageDragging = false;
+                imageHorizontalIntent = false;
+                settlePlayerImage(imageDragBase + (event.getRawX() - imageDownX), velocityX);
+            }
+        }
+    }
+
+    private void settlePlayerImage(float translation, float velocityX) {
+        MediaItem item = currentPlaybackItem();
+        float width = Math.max(dp(80), coverView.getWidth());
+        int dir = 0;
+        if (item != null && item.images.size() > 1) {
+            if (Math.abs(velocityX) > dp(420)) {
+                dir = velocityX < 0 ? 1 : -1;
+            } else if (Math.abs(translation) > width * 0.4f) {
+                dir = translation < 0 ? 1 : -1;
+            }
+        }
+        if (dir == 0) {
+            springImageBack();
+            return;
+        }
+        int target = Math.max(0, Math.min(item.images.size() - 1, currentImageIndex + dir));
+        if (target == currentImageIndex) {
+            springImageBack();
+            return;
+        }
+        beginImageSettle(dir, target);
+    }
+
+    private void beginImageSettle(int dir, int target) {
+        imageAnimGeneration++;
+        final int gen = imageAnimGeneration;
+        imageSwitching = true;
+        float width = Math.max(dp(80), coverView.getWidth());
+        float startX = coverView.getTranslationX();
+        float outX = -dir * width;
+        long outDuration = Math.max(90, (long) (220 * Math.abs(startX - outX) / width));
+        coverView.animate().translationX(outX).alpha(0.12f).setDuration(outDuration).withEndAction(() -> {
+            if (gen != imageAnimGeneration) {
+                return;
+            }
+            currentImageIndex = target;
+            showCurrentTrackImage();
+            coverView.setTranslationX(dir * width);
+            coverView.animate().translationX(0f).alpha(1f).setDuration(200).withEndAction(() -> {
+                if (gen == imageAnimGeneration) {
+                    imageSwitching = false;
+                }
+            }).start();
+        }).start();
+    }
+
+    private void springImageBack() {
+        imageAnimGeneration++;
+        final int gen = imageAnimGeneration;
+        imageSwitching = true;
+        coverView.animate().translationX(0f).alpha(1f).setDuration(180).withEndAction(() -> {
+            if (gen == imageAnimGeneration) {
+                imageSwitching = false;
+            }
+        }).start();
+    }
+
     private void switchPlayerImage(int direction) {
         MediaItem item = currentPlaybackItem();
-        if (pageMode != PAGE_PLAYER || item == null || item.images.size() <= 1 || imageSwitching) {
+        if (pageMode != PAGE_PLAYER || item == null || item.images.size() <= 1 || imageDragging) {
             return;
         }
         int target = currentImageIndex + direction;
         if (target < 0 || target >= item.images.size()) {
             return;
         }
-        imageSwitching = true;
-        float width = Math.max(dp(80), coverView.getWidth());
-        coverView.animate().translationX(-direction * width).alpha(0.1f).setDuration(160)
-                .withEndAction(() -> {
-                    currentImageIndex = target;
-                    showCurrentTrackImage();
-                    coverView.setTranslationX(direction * width);
-                    coverView.animate().translationX(0f).alpha(1f).setDuration(180)
-                            .withEndAction(() -> imageSwitching = false).start();
-                }).start();
+        beginImageSettle(direction, target);
     }
 
     private Button miniIndicatorButton(String text, int direction) {
         Button button = new Button(this);
         button.setText(text);
-        button.setTextColor(Color.WHITE);
-        button.setTextSize(14);
+        button.setTextColor(Color.rgb(96, 100, 106));
+        button.setTextSize(13);
         button.setAllCaps(false);
         button.setBackgroundColor(Color.TRANSPARENT);
         button.setPadding(0, 0, 0, 0);

@@ -12,8 +12,13 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Matrix;
 import android.graphics.PixelFormat;
+import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
+import android.media.AudioFormat;
+import android.media.MediaCodec;
+import android.media.MediaExtractor;
+import android.media.MediaFormat;
 import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Build;
@@ -54,6 +59,8 @@ import android.webkit.WebViewClient;
 
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.text.Collator;
 import java.util.ArrayList;
@@ -329,7 +336,7 @@ public class MainActivity extends Activity {
             goBackPage();
             return;
         }
-        super.onBackPressed();
+        moveTaskToBack(true);
     }    private void buildUi() {
         rootLayout = new FrameLayout(this);
         FrameLayout root = rootLayout;
@@ -337,36 +344,24 @@ public class MainActivity extends Activity {
 
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
-        page.setPadding(0, dp(20), 0, 0);
-        page.setGravity(Gravity.CENTER_HORIZONTAL);
+        page.setPadding(0, dp(14), 0, 0);
         root.addView(page, new FrameLayout.LayoutParams(-1, -1));
-
-        LinearLayout top = new LinearLayout(this);
-        top.setOrientation(LinearLayout.HORIZONTAL);
-        top.setGravity(Gravity.CENTER_VERTICAL);
-        top.setPadding(dp(24), 0, dp(24), 0);
-        page.addView(top, new LinearLayout.LayoutParams(-1, dp(42)));
-
-        TextView topSpacer = new TextView(this);
-        top.addView(topSpacer, new LinearLayout.LayoutParams(0, -1, 1));
 
         LinearLayout sectionHeader = new LinearLayout(this);
         sectionHeader.setOrientation(LinearLayout.VERTICAL);
-        sectionHeader.setGravity(Gravity.CENTER_HORIZONTAL);
-        sectionHeader.setPadding(dp(24), dp(18), dp(24), dp(8));
-        page.addView(sectionHeader, new LinearLayout.LayoutParams(-1, dp(112)));
+        sectionHeader.setPadding(dp(24), dp(4), dp(20), dp(2));
+        page.addView(sectionHeader, new LinearLayout.LayoutParams(-1, -2));
 
         sectionTitleView = label("作品列表", 22, colorTextPrimary);
         sectionTitleView.setSingleLine(true);
         sectionTitleView.setEllipsize(TextUtils.TruncateAt.END);
-        sectionTitleView.setGravity(Gravity.CENTER);
-        sectionHeader.addView(sectionTitleView, new LinearLayout.LayoutParams(-1, 0, 1));
+        sectionTitleView.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+        sectionTitleView.setTypeface(Typeface.DEFAULT_BOLD);
+        sectionHeader.addView(sectionTitleView, new LinearLayout.LayoutParams(-1, dp(34)));
 
         LinearLayout subtitleRow = new LinearLayout(this);
         subtitleRow.setOrientation(LinearLayout.HORIZONTAL);
-        subtitleRow.setGravity(Gravity.CENTER_VERTICAL);
-        TextView subtitleSpacerLeft = new TextView(this);
-        subtitleRow.addView(subtitleSpacerLeft, new LinearLayout.LayoutParams(0, -1, 1));
+        subtitleRow.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
 
         coverTopThumb = new ImageView(this);
         coverTopThumb.setVisibility(View.GONE);
@@ -376,24 +371,20 @@ public class MainActivity extends Activity {
             currentImageIndex = 0;
             showCurrentTrackImage();
         });
-        LinearLayout.LayoutParams thumbParams = new LinearLayout.LayoutParams(dp(26), dp(26));
-        thumbParams.rightMargin = dp(6);
+        LinearLayout.LayoutParams thumbParams = new LinearLayout.LayoutParams(dp(24), dp(24));
+        thumbParams.rightMargin = dp(7);
         subtitleRow.addView(coverTopThumb, thumbParams);
 
         sectionSubtitleView = label("请选择文件夹，自动识别 ASMR 作品", 13, colorTextSecondary);
         sectionSubtitleView.setSingleLine(true);
         sectionSubtitleView.setEllipsize(TextUtils.TruncateAt.END);
-        sectionSubtitleView.setGravity(Gravity.CENTER);
-        sectionSubtitleView.setMaxWidth(dp(240));
-        subtitleRow.addView(sectionSubtitleView, new LinearLayout.LayoutParams(-2, -1));
-
-        TextView subtitleSpacerRight = new TextView(this);
-        subtitleRow.addView(subtitleSpacerRight, new LinearLayout.LayoutParams(0, -1, 1));
-        sectionHeader.addView(subtitleRow, new LinearLayout.LayoutParams(-1, 0, 1));
+        sectionSubtitleView.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+        subtitleRow.addView(sectionSubtitleView, new LinearLayout.LayoutParams(0, -1, 1));
+        sectionHeader.addView(subtitleRow, new LinearLayout.LayoutParams(-1, dp(30)));
 
         contentPanel = new LinearLayout(this);
         contentPanel.setOrientation(LinearLayout.VERTICAL);
-        contentPanel.setPadding(dp(18), dp(14), dp(18), dp(10));
+        contentPanel.setPadding(dp(18), dp(8), dp(18), dp(10));
         page.addView(contentPanel, new LinearLayout.LayoutParams(-1, 0, 1));
 
         coverView = new ImageView(this);
@@ -418,7 +409,7 @@ public class MainActivity extends Activity {
 
         LinearLayout.LayoutParams coverParams = new LinearLayout.LayoutParams(-1, 0);
         coverParams.weight = 1f;
-        coverParams.topMargin = dp(8);
+        coverParams.topMargin = dp(2);
         playerArea.addView(coverView, coverParams);
 
         imageIndicator = new LinearLayout(this);
@@ -437,21 +428,22 @@ public class MainActivity extends Activity {
         playerArea.addView(imageIndicator, indicatorRowParams);
 
         LinearLayout infoPanel = panel();
-        LinearLayout.LayoutParams infoParams = new LinearLayout.LayoutParams(-1, dp(132));
-        infoParams.topMargin = dp(12);
+        LinearLayout.LayoutParams infoParams = new LinearLayout.LayoutParams(-1, dp(108));
+        infoParams.topMargin = dp(10);
         playerArea.addView(infoPanel, infoParams);
 
-        titleView = label("请选择包含 RJ 作品文件夹的目录", 18, colorTextPrimary);
+        titleView = label("请选择包含 RJ 作品文件夹的目录", 17, colorTextPrimary);
         titleView.setSingleLine(true);
         titleView.setEllipsize(TextUtils.TruncateAt.END);
         titleView.setGravity(Gravity.CENTER);
-        infoPanel.addView(titleView, new LinearLayout.LayoutParams(-1, dp(40)));
+        infoPanel.addView(titleView, new LinearLayout.LayoutParams(-1, dp(36)));
 
         folderView = label("会递归识别 mp3/wav、图片和 .vtt，并自动按作品分组。", 13, colorTextSecondary);
         folderView.setSingleLine(true);
         folderView.setEllipsize(TextUtils.TruncateAt.END);
         folderView.setGravity(Gravity.CENTER);
-        infoPanel.addView(folderView, new LinearLayout.LayoutParams(-1, dp(25)));
+        folderView.setVisibility(View.GONE);
+        infoPanel.addView(folderView, new LinearLayout.LayoutParams(-1, 0));
 
         lyricView = label("", 15, colorLyric);
         lyricView.setGravity(Gravity.CENTER);
@@ -475,6 +467,8 @@ public class MainActivity extends Activity {
         playButton.setTextSize(20);
         playButton.setAllCaps(false);
         playButton.setBackground(roundRect(colorAccent, 27));
+        playButton.setStateListAnimator(null);
+        playButton.setElevation(0f);
         playButton.setOnClickListener(v -> togglePlayback());
         playButton.setMinWidth(0);
         playButton.setMinimumWidth(0);
@@ -595,6 +589,8 @@ public class MainActivity extends Activity {
         miniPlayButton.setMinimumWidth(0);
         miniPlayButton.setPadding(0, 0, 0, 0);
         miniPlayButton.setBackground(roundRect(colorAccent, 18));
+        miniPlayButton.setStateListAnimator(null);
+        miniPlayButton.setElevation(0f);
         miniPlayButton.setOnClickListener(v -> togglePlayback());
         LinearLayout.LayoutParams miniPlayParams = new LinearLayout.LayoutParams(dp(40), dp(36));
         miniPlayParams.leftMargin = dp(6);
@@ -958,6 +954,8 @@ public class MainActivity extends Activity {
         button.setGravity(Gravity.CENTER_VERTICAL);
         button.setPadding(dp(14), 0, dp(14), 0);
         button.setBackground(roundRect(colorChip, 12));
+        button.setStateListAnimator(null);
+        button.setElevation(0f);
         return button;
     }
 
@@ -1565,6 +1563,8 @@ public class MainActivity extends Activity {
         GradientDrawable chipBg = roundRect(colorChip, 16);
         chipBg.setStroke(dp(1), colorCardStroke);
         chip.setBackground(chipBg);
+        chip.setStateListAnimator(null);
+        chip.setElevation(0f);
         chip.setOnClickListener(v -> setFilter(index));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, dp(32));
         if (filterChipRow.getChildCount() > 0) {
@@ -2164,8 +2164,7 @@ public class MainActivity extends Activity {
         draggingListItem = false;
         updatePageChrome(true);
         browserAdapter.notifyDataSetChanged();
-        sectionTitleView.setText("作品列表");
-        sectionSubtitleView.setText(works.size() + " 个作品");
+        setSectionHeader("作品列表", works.size() + " 个作品");
         titleView.setText(works.isEmpty() ? "没有识别到 ASMR 音频作品" : "作品列表");
         folderView.setText(works.size() + " 个作品");
         lyricView.setText(works.isEmpty() ? "请选择包含 RJ 文件夹或音频文件的目录" : "点击作品查看音轨并播放");
@@ -2187,8 +2186,7 @@ public class MainActivity extends Activity {
         draggingListItem = false;
         updatePageChrome(true);
         browserAdapter.notifyDataSetChanged();
-        sectionTitleView.setText(activeWork.name);
-        sectionSubtitleView.setText("音轨列表");
+        setSectionHeader(activeWork.name, "音轨列表 · " + activeWork.tracks.size() + " 首音轨");
         titleView.setText(activeWork.name);
         folderView.setText(activeWork.tracks.size() + " 首音轨");
         MediaItem current = currentPlaybackItem();
@@ -2205,9 +2203,8 @@ public class MainActivity extends Activity {
         pageMode = PAGE_PLAYER;
         updatePageChrome(true);
         browserAdapter.notifyDataSetChanged();
-        sectionTitleView.setText("正在播放");
         MediaItem current = currentPlaybackItem();
-        sectionSubtitleView.setText(playbackWork == null ? "" : playbackWork.name);
+        setPlayerHeader(playbackWork == null ? "" : playbackWork.name);
         if (current != null) {
             titleView.setText(current.audio.name);
             folderView.setText(playbackWork == null ? current.audio.parentPath : playbackWork.name);
@@ -2230,9 +2227,8 @@ public class MainActivity extends Activity {
         pageMode = PAGE_LYRICS;
         updatePageChrome(true);
         lyricsAdapter.notifyDataSetChanged();
-        sectionTitleView.setText("台词");
         MediaItem current = currentPlaybackItem();
-        sectionSubtitleView.setText(current == null ? "点击台词跳转播放位置" : current.audio.name);
+        setSectionHeader("台词", current == null ? "点击台词跳转播放位置" : current.audio.name);
         if (currentCueIndex >= 0) {
             lyricsList.post(() -> lyricsList.smoothScrollToPosition(currentCueIndex));
         }
@@ -2380,6 +2376,10 @@ public class MainActivity extends Activity {
 
     private void showMainTab(int tab) {
         if (tab == TAB_MY) {
+            if (currentTab == TAB_MY && (pageMode == PAGE_TRACKS || pageMode == PAGE_PLAYER || pageMode == PAGE_LYRICS)) {
+                showWorks();
+                return;
+            }
             restoreMyTabFast();
             return;
         }
@@ -2389,12 +2389,10 @@ public class MainActivity extends Activity {
         currentTab = tab;
         updatePageChrome(false);
         if (tab == TAB_HEARD) {
-            sectionTitleView.setText("听过");
-            sectionSubtitleView.setText(recentTracks.isEmpty() ? "还没有播放记录" : "近期播放 " + recentTracks.size() + " 条");
+            setSectionHeader("听过", recentTracks.isEmpty() ? "还没有播放记录" : "近期播放 " + recentTracks.size() + " 条");
             recentAdapter.notifyDataSetChanged();
         } else if (tab == TAB_SETTINGS) {
-            sectionTitleView.setText("设置");
-            sectionSubtitleView.setText("文件夹选择与台词悬浮");
+            setSectionHeader("设置", "文件夹选择与台词悬浮");
             updateFloatingLyricsButton();
         }
     }
@@ -2412,30 +2410,26 @@ public class MainActivity extends Activity {
 
     private void updateMyHeaderFast() {
         if (pageMode == PAGE_WORKS) {
-            sectionTitleView.setText("作品列表");
-            sectionSubtitleView.setText(works.size() + " 个作品");
+            setSectionHeader("作品列表", works.size() + " 个作品");
             titleView.setText(works.isEmpty() ? "没有识别到 ASMR 音频作品" : "作品列表");
             folderView.setText(works.size() + " 个作品");
             lyricView.setText(works.isEmpty() ? "请选择包含 RJ 文件夹或音频文件的目录" : "点击作品查看音轨并播放");
         } else if (pageMode == PAGE_TRACKS && activeWork != null) {
-            sectionTitleView.setText(activeWork.name);
-            sectionSubtitleView.setText("音轨列表");
+            setSectionHeader(activeWork.name, "音轨列表 · " + activeWork.tracks.size() + " 首音轨");
             titleView.setText(activeWork.name);
             folderView.setText(activeWork.tracks.size() + " 首音轨");
             MediaItem current = currentPlaybackItem();
             lyricView.setText(current == null ? "点击音轨进入播放页" : "正在播放: " + current.audio.name);
         } else if (pageMode == PAGE_PLAYER) {
             MediaItem current = currentPlaybackItem();
-            sectionTitleView.setText("正在播放");
-            sectionSubtitleView.setText(playbackWork == null ? "" : playbackWork.name);
+            setPlayerHeader(playbackWork == null ? "" : playbackWork.name);
             if (current != null) {
                 titleView.setText(current.audio.name);
                 folderView.setText(playbackWork == null ? current.audio.parentPath : playbackWork.name);
             }
         } else if (pageMode == PAGE_LYRICS) {
             MediaItem current = currentPlaybackItem();
-            sectionTitleView.setText("台词");
-            sectionSubtitleView.setText(current == null ? "点击台词跳转播放位置" : current.audio.name);
+            setSectionHeader("台词", current == null ? "点击台词跳转播放位置" : current.audio.name);
         }
     }
 
@@ -2452,6 +2446,28 @@ public class MainActivity extends Activity {
         button.setTextColor(active ? colorAccent : colorTextSecondary);
         button.setBackgroundColor(Color.TRANSPARENT);
         button.setTextSize(active ? 15 : 13);
+    }
+
+    private void setSectionHeader(String title, String subtitle) {
+        sectionTitleView.setText(title);
+        sectionTitleView.setTextSize(22);
+        sectionTitleView.setTypeface(Typeface.DEFAULT_BOLD);
+        sectionTitleView.setTextColor(colorTextPrimary);
+        sectionSubtitleView.setText(subtitle);
+        sectionSubtitleView.setTextSize(13);
+        sectionSubtitleView.setTypeface(Typeface.DEFAULT);
+        sectionSubtitleView.setTextColor(colorTextSecondary);
+    }
+
+    private void setPlayerHeader(String subtitle) {
+        sectionTitleView.setText("正在播放");
+        sectionTitleView.setTextSize(13);
+        sectionTitleView.setTypeface(Typeface.DEFAULT);
+        sectionTitleView.setTextColor(colorTextSecondary);
+        sectionSubtitleView.setText(subtitle);
+        sectionSubtitleView.setTextSize(20);
+        sectionSubtitleView.setTypeface(Typeface.DEFAULT_BOLD);
+        sectionSubtitleView.setTextColor(colorTextPrimary);
     }
 
     private void updatePageChrome(boolean animate) {
@@ -2528,6 +2544,7 @@ public class MainActivity extends Activity {
         currentCueIndex = -1;
         lyricsAdapter.notifyDataSetChanged();
         releasePlayer();
+        waveform.setWaveform(null);
         player = new MediaPlayer();
         try {
             player.setDataSource(this, item.audio.uri);
@@ -2537,6 +2554,7 @@ public class MainActivity extends Activity {
                 timeView.setText("00:00 / " + formatTime(duration));
                 waveform.setPosition(0, duration);
                 mp.start();
+                prepareWaveform(item.audio.uri, duration);
                 playButton.setText(ICON_PAUSE);
                 miniPlayButton.setText(ICON_PAUSE);
                 statusView.setText("播放中");
@@ -3176,8 +3194,190 @@ public class MainActivity extends Activity {
         });
     }
 
-    private MediaItem currentPlaybackItem() {
-        if (currentIndex < 0 || currentIndex >= playbackQueue.size()) {
+    private final Map<String, float[]> waveformCache = new HashMap<>();
+    private String waveformKey;
+
+    private void prepareWaveform(Uri uri, int durationMs) {
+        String key = uri.toString();
+        waveformKey = key;
+        waveform.setWaveform(null);
+        float[] cached = waveformCache.get(key);
+        if (cached != null) {
+            waveform.setWaveform(cached);
+            return;
+        }
+        imageExecutor.execute(() -> {
+            float[] data = computeWaveform(uri, durationMs);
+            if (data == null) {
+                return;
+            }
+            waveformCache.put(key, data);
+            handler.post(() -> {
+                if (key.equals(waveformKey)) {
+                    waveform.setWaveform(data);
+                }
+            });
+        });
+    }
+
+    private float[] computeWaveform(Uri uri, int durationMs) {
+        MediaExtractor extractor = new MediaExtractor();
+        MediaCodec codec = null;
+        try {
+            extractor.setDataSource(this, uri, null);
+            int trackIndex = -1;
+            MediaFormat format = null;
+            for (int i = 0; i < extractor.getTrackCount(); i++) {
+                MediaFormat f = extractor.getTrackFormat(i);
+                String mime = f.getString(MediaFormat.KEY_MIME);
+                if (mime != null && mime.startsWith("audio/")) {
+                    trackIndex = i;
+                    format = f;
+                    break;
+                }
+            }
+            if (trackIndex < 0 || format == null) {
+                return null;
+            }
+            extractor.selectTrack(trackIndex);
+            String mime = format.getString(MediaFormat.KEY_MIME);
+            long durationUs = durationMs > 0 ? durationMs * 1000L
+                    : (format.containsKey(MediaFormat.KEY_DURATION) ? format.getLong(MediaFormat.KEY_DURATION) : 0L);
+            if (durationUs <= 0) {
+                return null;
+            }
+            int sampleRate = format.containsKey(MediaFormat.KEY_SAMPLE_RATE)
+                    ? format.getInteger(MediaFormat.KEY_SAMPLE_RATE) : 44100;
+            int channels = format.containsKey(MediaFormat.KEY_CHANNEL_COUNT)
+                    ? format.getInteger(MediaFormat.KEY_CHANNEL_COUNT) : 2;
+            int pcmEncoding = format.containsKey(MediaFormat.KEY_PCM_ENCODING)
+                    ? format.getInteger(MediaFormat.KEY_PCM_ENCODING) : AudioFormat.ENCODING_PCM_16BIT;
+            final int buckets = 160;
+            float[] maxAmp = new float[buckets];
+            long totalFrames = durationUs * sampleRate / 1_000_000L;
+            int stride = (int) Math.max(1, totalFrames / 300_000);
+
+            if ("audio/raw".equals(mime)) {
+                ByteBuffer raw = ByteBuffer.allocateDirect(128 * 1024);
+                while (true) {
+                    raw.clear();
+                    int size = extractor.readSampleData(raw, 0);
+                    if (size < 0) {
+                        break;
+                    }
+                    long pts = extractor.getSampleTime();
+                    ingestPcm(raw, size, pts, durationUs, maxAmp, sampleRate, channels, pcmEncoding, stride);
+                    extractor.advance();
+                }
+            } else {
+                codec = MediaCodec.createDecoderByType(mime);
+                codec.configure(format, null, null, 0);
+                codec.start();
+                MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+                boolean inputDone = false;
+                boolean outputDone = false;
+                while (!outputDone) {
+                    if (!inputDone) {
+                        int inIdx = codec.dequeueInputBuffer(10_000);
+                        if (inIdx >= 0) {
+                            ByteBuffer in = codec.getInputBuffer(inIdx);
+                            int size = in == null ? -1 : extractor.readSampleData(in, 0);
+                            if (size < 0) {
+                                codec.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                                inputDone = true;
+                            } else {
+                                long pts = extractor.getSampleTime();
+                                codec.queueInputBuffer(inIdx, 0, size, pts, 0);
+                                extractor.advance();
+                            }
+                        }
+                    }
+                    int outIdx = codec.dequeueOutputBuffer(info, 10_000);
+                    if (outIdx >= 0) {
+                        ByteBuffer out = codec.getOutputBuffer(outIdx);
+                        if (out != null && info.size > 0) {
+                            out.position(info.offset);
+                            out.limit(info.offset + info.size);
+                            ingestPcm(out, info.size, info.presentationTimeUs, durationUs, maxAmp,
+                                    sampleRate, channels, pcmEncoding, stride);
+                        }
+                        codec.releaseOutputBuffer(outIdx, false);
+                        if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                            outputDone = true;
+                        }
+                    } else if (outIdx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                        MediaFormat outFormat = codec.getOutputFormat();
+                        sampleRate = outFormat.containsKey(MediaFormat.KEY_SAMPLE_RATE)
+                                ? outFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE) : sampleRate;
+                        channels = outFormat.containsKey(MediaFormat.KEY_CHANNEL_COUNT)
+                                ? outFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT) : channels;
+                        pcmEncoding = outFormat.containsKey(MediaFormat.KEY_PCM_ENCODING)
+                                ? outFormat.getInteger(MediaFormat.KEY_PCM_ENCODING) : pcmEncoding;
+                    }
+                }
+                codec.stop();
+                codec.release();
+                codec = null;
+            }
+            float peak = 0f;
+            for (float v : maxAmp) {
+                peak = Math.max(peak, v);
+            }
+            if (peak <= 0.0001f) {
+                return null;
+            }
+            for (int i = 0; i < buckets; i++) {
+                maxAmp[i] = maxAmp[i] / peak;
+            }
+            return maxAmp;
+        } catch (Exception ex) {
+            return null;
+        } finally {
+            try {
+                extractor.release();
+            } catch (Exception ignored) {
+            }
+            if (codec != null) {
+                try {
+                    codec.release();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    }
+
+    private void ingestPcm(ByteBuffer buffer, int size, long ptsUs, long durationUs, float[] maxAmp,
+                           int sampleRate, int channels, int pcmEncoding, int stride) {
+        int bytesPerSample = pcmEncoding == AudioFormat.ENCODING_PCM_FLOAT ? 4
+                : (pcmEncoding == AudioFormat.ENCODING_PCM_8BIT ? 1 : 2);
+        int frameBytes = Math.max(1, bytesPerSample * Math.max(1, channels));
+        int frames = size / frameBytes;
+        if (frames <= 0) {
+            return;
+        }
+        buffer.order(ByteOrder.LITTLE_ENDIAN);
+        int startPos = buffer.position();
+        for (int f = 0; f < frames; f += stride) {
+            buffer.position(startPos + f * frameBytes);
+            float peak = 0f;
+            for (int c = 0; c < channels && buffer.remaining() >= bytesPerSample; c++) {
+                float v;
+                if (bytesPerSample == 1) {
+                    v = Math.abs(buffer.get() / 128f);
+                } else if (bytesPerSample == 4) {
+                    v = Math.abs(buffer.getFloat());
+                } else {
+                    v = Math.abs(buffer.getShort() / 32768f);
+                }
+                peak = Math.max(peak, v);
+            }
+            long sampleUs = ptsUs + (long) f * 1_000_000L / Math.max(1, sampleRate);
+            int bucket = (int) Math.min(maxAmp.length - 1, Math.max(0, sampleUs * maxAmp.length / durationUs));
+            maxAmp[bucket] = Math.max(maxAmp[bucket], peak);
+        }
+    }
+
+    private MediaItem currentPlaybackItem() {        if (currentIndex < 0 || currentIndex >= playbackQueue.size()) {
             return null;
         }
         return playbackQueue.get(currentIndex);
@@ -3456,6 +3656,7 @@ public class MainActivity extends Activity {
         private final android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
         private int durationMs;
         private int positionMs;
+        private float[] amplitudes;
 
         WaveformView(Context context) {
             super(context);
@@ -3474,10 +3675,22 @@ public class MainActivity extends Activity {
             invalidate();
         }
 
-        private float barHeightFraction(int index) {
-            double v = Math.abs(Math.sin(index * 12.9898 + 4.1414)) * 0.72
-                    + Math.abs(Math.sin(index * 3.71 + 1.37)) * 0.28;
-            return 0.16f + (float) v * 0.84f;
+        void setWaveform(float[] data) {
+            amplitudes = data;
+            invalidate();
+        }
+
+        private float amplitudeAt(int index, int count) {
+            if (amplitudes == null || amplitudes.length == 0) {
+                double v = Math.abs(Math.sin(index * 12.9898 + 4.1414)) * 0.72
+                        + Math.abs(Math.sin(index * 3.71 + 1.37)) * 0.28;
+                return 0.16f + (float) v * 0.84f;
+            }
+            float pos = index * amplitudes.length / (float) count;
+            int i0 = Math.min(amplitudes.length - 1, (int) pos);
+            int i1 = Math.min(amplitudes.length - 1, i0 + 1);
+            float t = pos - i0;
+            return 0.1f + (amplitudes[i0] * (1f - t) + amplitudes[i1] * t) * 0.9f;
         }
 
         @Override
@@ -3488,15 +3701,27 @@ public class MainActivity extends Activity {
             if (width <= 0 || height <= 0) {
                 return;
             }
+            float fraction = durationMs > 0 ? Math.min(1f, positionMs / (float) durationMs) : 0f;
+            if (amplitudes == null) {
+                float barHeight = dp(4);
+                float top = (height - barHeight) / 2f;
+                paint.setColor(colorWaveUnplayed);
+                canvas.drawRoundRect(0, top, width, top + barHeight, barHeight / 2f, barHeight / 2f, paint);
+                if (fraction > 0f) {
+                    paint.setColor(colorAccent);
+                    canvas.drawRoundRect(0, top, width * fraction, top + barHeight, barHeight / 2f, barHeight / 2f, paint);
+                }
+                return;
+            }
             float slot = width / BAR_COUNT;
             float barWidth = Math.max(dp(2), slot * 0.42f);
-            float fraction = durationMs > 0 ? Math.min(1f, positionMs / (float) durationMs) : 0f;
             for (int i = 0; i < BAR_COUNT; i++) {
-                float barHeight = height * 0.94f * barHeightFraction(i);
+                float amp = amplitudeAt(i, BAR_COUNT);
+                float barHeight = Math.max(dp(3), height * 0.94f * amp);
                 float left = i * slot + (slot - barWidth) / 2f;
                 float top = (height - barHeight) / 2f;
                 paint.setColor(i / (float) BAR_COUNT < fraction ? colorAccent : colorWaveUnplayed);
-                canvas.drawRect(left, top, left + barWidth, top + barHeight, paint);
+                canvas.drawRoundRect(left, top, left + barWidth, top + barHeight, barWidth / 2f, barWidth / 2f, paint);
             }
         }
     }
@@ -3714,7 +3939,8 @@ public class MainActivity extends Activity {
             boolean moving = position == movingWorkIndex;
             holder.title.setText(work.name);
             holder.title.setTextColor(moving ? colorAccent : colorTextPrimary);
-            String coverState = work.cover == null ? "无封面" : "有封面";
+            int imageCount = work.tracks.isEmpty() ? 0 : work.tracks.get(0).images.size();
+            String coverState = work.cover == null ? "无封面" : "有封面 · " + imageCount + " 张图片";
             String subtitle = moving ? "拖动中 · 松开保存位置" : work.tracks.size() + " 首音轨 · " + coverState;
             holder.subtitle.setText(subtitle);
             holder.subtitle.setTextColor(moving ? colorAccent : colorTextSecondary);

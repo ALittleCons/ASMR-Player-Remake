@@ -2243,36 +2243,49 @@ public class MainActivity extends Activity {
         }
         listSwipeBackAnimating = true;
         View snapshotSource = contentPanel != null ? contentPanel : browserList;
-        Bitmap tracksShot = snapshotView(snapshotSource);
+        // 快照裁掉底部导航栏（dp44 高 + dp4 边距），动画期间底导航保持真实 UI
+        // 静止显示，避免上层滑动快照与下层静止快照中的导航栏错位重影
+        int navStrip = dp(48);
+        int panelW = snapshotSource.getWidth();
+        int panelH = Math.max(1, snapshotSource.getHeight() - navStrip);
+        Bitmap tracksFull = snapshotView(snapshotSource);
+        Bitmap tracksShot = Bitmap.createBitmap(tracksFull, 0, 0, panelW, panelH);
+        if (tracksShot != tracksFull) {
+            tracksFull.recycle();
+        }
         ImageView tracksOverlay = new ImageView(this);
         tracksOverlay.setImageBitmap(tracksShot);
+        // 挡住触摸，避免动画期间穿透点到下方真实列表
+        tracksOverlay.setClickable(true);
         int[] pos = rectOnRoot(snapshotSource, new int[2]);
-        int panelW = snapshotSource.getWidth();
-        int panelH = snapshotSource.getHeight();
         FrameLayout.LayoutParams overlayParams =
                 new FrameLayout.LayoutParams(panelW, panelH, Gravity.TOP | Gravity.START);
         tracksOverlay.setTranslationX(pos[0]);
         tracksOverlay.setTranslationY(pos[1]);
         rootLayout.addView(tracksOverlay, overlayParams);
-        tracksOverlay.bringToFront();
 
         showWorks();
-        browserList.animate().cancel();
-        browserList.setAlpha(1f);
 
         browserList.post(() -> {
-            Bitmap worksShot = snapshotView(snapshotSource);
+            Bitmap worksFull = snapshotView(snapshotSource);
+            Bitmap worksShot = Bitmap.createBitmap(worksFull, 0, 0, panelW, panelH);
+            if (worksShot != worksFull) {
+                worksFull.recycle();
+            }
             ImageView worksOverlay = new ImageView(this);
             worksOverlay.setImageBitmap(worksShot);
+            worksOverlay.setClickable(true);
             rootLayout.addView(worksOverlay, new FrameLayout.LayoutParams(panelW, panelH, Gravity.TOP | Gravity.START));
             worksOverlay.setTranslationX(pos[0]);
             worksOverlay.setTranslationY(pos[1] - panelH);
             worksOverlay.bringToFront();
-            rootLayout.removeView(tracksOverlay);
+            // 音轨覆盖层全程盖住屏幕，作品页从上方滑下覆盖其上，
+            // 动画结束后才一起移除，避免中途露出真实页面造成跳变
             worksOverlay.animate().translationY(pos[1])
                     .setDuration(300)
                     .setInterpolator(new android.view.animation.DecelerateInterpolator())
                     .withEndAction(() -> {
+                        rootLayout.removeView(tracksOverlay);
                         rootLayout.removeView(worksOverlay);
                         listSwipeBackAnimating = false;
                     }).start();

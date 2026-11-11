@@ -8,7 +8,9 @@ import android.database.ContentObserver;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Matrix;
 import android.graphics.PixelFormat;
 import android.graphics.drawable.ColorDrawable;
 import android.media.MediaPlayer;
@@ -22,7 +24,9 @@ import android.provider.Settings;
 import android.text.TextUtils;
 import android.util.LruCache;
 import android.view.Gravity;
+import android.view.GestureDetector;
 import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -84,6 +88,7 @@ public class MainActivity extends Activity {
     private static final String KEY_TREE_URI = "tree_uri";
     private static final String KEY_TREE_URIS = "tree_uris";
     private static final long RESCAN_DEBOUNCE_MS = 1200;
+    private static final java.util.regex.Pattern RJ_CODE_PATTERN = java.util.regex.Pattern.compile("rj\\d{2,}");
     private static final long POLL_INTERVAL_MS = 6000;
     private static final String KEY_LIBRARY_CACHE = "library_cache";
     private static final String KEY_FLOATING_LYRICS = "floating_lyrics";
@@ -166,6 +171,13 @@ public class MainActivity extends Activity {
     private TextView sectionTitleView;
     private TextView sectionSubtitleView;
     private ImageView coverView;
+    private ImageView coverTopThumb;
+    private FrameLayout viewerOverlay;
+    private ZoomImageView viewerImage;
+    private TextView viewerIndexLabel;
+    private List<FileDoc> viewerImages;
+    private int viewerPosition;
+    private final LruCache<String, Bitmap> bigImageCache = new LruCache<String, Bitmap>(24);
     private TextView titleView;
     private TextView folderView;
     private TextView lyricView;
@@ -267,6 +279,10 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
+        if (viewerOverlay != null && viewerOverlay.getVisibility() == View.VISIBLE) {
+            closeImageViewer();
+            return;
+        }
         if (settingsDrawer != null && settingsDrawer.getVisibility() == View.VISIBLE) {
             hideSettingsDrawer();
             return;
@@ -341,13 +357,26 @@ public class MainActivity extends Activity {
         playerArea.setVisibility(View.GONE);
         contentPanel.addView(playerArea, new LinearLayout.LayoutParams(-1, 0, 1));
 
+        coverTopThumb = new ImageView(this);
+        coverTopThumb.setVisibility(View.GONE);
+        coverTopThumb.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        coverTopThumb.setBackgroundColor(Color.rgb(31, 35, 41));
+        coverTopThumb.setOnClickListener(v -> {
+            currentImageIndex = 0;
+            showCurrentTrackImage();
+        });
+        LinearLayout.LayoutParams thumbParams = new LinearLayout.LayoutParams(dp(64), dp(64));
+        thumbParams.gravity = Gravity.CENTER_HORIZONTAL;
+        thumbParams.topMargin = dp(12);
+        playerArea.addView(coverTopThumb, thumbParams);
+
         coverView = new ImageView(this);
         coverView.setBackgroundColor(Color.rgb(31, 35, 41));
         coverView.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        coverView.setOnClickListener(v -> showNextTrackImage());
+        coverView.setOnClickListener(v -> openImageViewer());
         LinearLayout.LayoutParams coverParams = new LinearLayout.LayoutParams(-1, 0);
         coverParams.weight = 1f;
-        coverParams.topMargin = dp(18);
+        coverParams.topMargin = dp(10);
         playerArea.addView(coverView, coverParams);
 
         LinearLayout infoPanel = panel();
@@ -1695,6 +1724,11 @@ public class MainActivity extends Activity {
         }
         WorkItem work = new WorkItem(key, name, cover, tracks);
         work.rootUri = object.optString("rootUri", "");
+        if (cover != null) {
+            for (MediaItem item : work.tracks) {
+                item.moveCoverFirst(cover);
+            }
+        }
         return work;
     }
 
@@ -2064,6 +2098,10 @@ public class MainActivity extends Activity {
     }
 
     private void goBackPage() {
+        if (viewerOverlay != null && viewerOverlay.getVisibility() == View.VISIBLE) {
+            closeImageViewer();
+            return;
+        }
         if (pageMode == PAGE_PLAYER) {
             showTracks();
         } else if (pageMode == PAGE_LYRICS) {
@@ -2480,6 +2518,9 @@ public class MainActivity extends Activity {
 
     private void resetPlaybackUi() {
         coverView.setImageDrawable(null);
+        if (coverTopThumb != null) {
+            coverTopThumb.setVisibility(View.GONE);
+        }
         lyricView.setText("");
         updateFloatingLyricText();
         currentImageIndex = 0;
@@ -2531,29 +2572,54 @@ public class MainActivity extends Activity {
         MediaItem item = currentPlaybackItem();
         if (item == null) {
             coverView.setImageDrawable(null);
+            coverTopThumb.setVisibility(View.GONE);
             return;
         }
+        FileDoc shown = null;
         if (!item.images.isEmpty()) {
             currentImageIndex = Math.max(0, Math.min(currentImageIndex, item.images.size() - 1));
-            coverView.setImageURI(item.images.get(currentImageIndex).uri);
+            shown = item.images.get(currentImageIndex);
         } else if (playbackWork != null && playbackWork.cover != null) {
-            coverView.setImageURI(playbackWork.cover.uri);
+            shown = playbackWork.cover;
+        }
+        if (shown != null) {
+            showBigImage(shown);
         } else {
             coverView.setImageDrawable(null);
         }
+        FileDoc cover = playbackWork != null ? playbackWork.cover : (item.images.isEmpty() ? null : item.images.get(0));
+        if (currentImageIndex > 0 && cover != null) {
+            coverTopThumb.setVisibility(View.VISIBLE);
+            loadCoverInto(coverTopThumb, cover);
+        } else {
+            coverTopThumb.setVisibility(View.GONE);
+        }
+        if (item.images.size() > 1) {
+            statusView.setText("图片 " + (currentImageIndex + 1) + "/" + item.images.size() + " · 点击大图可全屏缩放");
+        }
     }
 
-    private void showNextTrackImage() {
-        MediaItem item = currentPlaybackItem();
-        if (pageMode != PAGE_PLAYER || item == null) {
+    private void showBigImage(FileDoc doc) {
+        String key = doc.uri.toString();
+        coverView.setTag(key);
+        Bitmap cached = bigImageCache.get(key);
+        if (cached != null) {
+            coverView.setImageBitmap(cached);
             return;
         }
-        if (item.images.size() <= 1) {
-            return;
-        }
-        currentImageIndex = (currentImageIndex + 1) % item.images.size();
-        showCurrentTrackImage();
-        statusView.setText("图片 " + (currentImageIndex + 1) + "/" + item.images.size());
+        coverView.setImageDrawable(null);
+        imageExecutor.execute(() -> {
+            Bitmap bitmap = decodeSampled(doc.uri, 1440);
+            if (bitmap == null) {
+                return;
+            }
+            bigImageCache.put(key, bitmap);
+            handler.post(() -> {
+                if (key.equals(coverView.getTag())) {
+                    coverView.setImageBitmap(bitmap);
+                }
+            });
+        });
     }
 
     private MediaItem currentPlaybackItem() {
@@ -2561,6 +2627,274 @@ public class MainActivity extends Activity {
             return null;
         }
         return playbackQueue.get(currentIndex);
+    }
+
+    private void openImageViewer() {
+        List<FileDoc> images = null;
+        MediaItem item = currentPlaybackItem();
+        if (pageMode == PAGE_PLAYER && item != null && !item.images.isEmpty()) {
+            images = item.images;
+        } else if (playbackWork != null && playbackWork.cover != null) {
+            images = Collections.singletonList(playbackWork.cover);
+        } else if (activeWork != null && activeWork.cover != null) {
+            images = Collections.singletonList(activeWork.cover);
+        }
+        if (images == null || images.isEmpty()) {
+            return;
+        }
+        viewerImages = images;
+        viewerPosition = Math.max(0, Math.min(currentImageIndex, images.size() - 1));
+        buildViewerOverlay();
+        viewerOverlay.setVisibility(View.VISIBLE);
+        viewerShowImage(viewerPosition);
+    }
+
+    private void buildViewerOverlay() {
+        if (viewerOverlay != null) {
+            return;
+        }
+        viewerOverlay = new FrameLayout(this);
+        viewerOverlay.setBackgroundColor(Color.BLACK);
+        viewerImage = new ZoomImageView(this);
+        viewerOverlay.addView(viewerImage, new FrameLayout.LayoutParams(-1, -1));
+
+        TextView closeButton = label("✕", 22, Color.WHITE);
+        closeButton.setGravity(Gravity.CENTER);
+        closeButton.setPadding(dp(16), dp(8), dp(16), dp(8));
+        closeButton.setOnClickListener(v -> closeImageViewer());
+        FrameLayout.LayoutParams closeParams = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END);
+        closeParams.topMargin = dp(16);
+        closeParams.rightMargin = dp(16);
+        viewerOverlay.addView(closeButton, closeParams);
+
+        LinearLayout viewerBar = new LinearLayout(this);
+        viewerBar.setOrientation(LinearLayout.HORIZONTAL);
+        viewerBar.setGravity(Gravity.CENTER);
+
+        Button prevButton = new Button(this);
+        prevButton.setText("‹");
+        prevButton.setTextColor(Color.WHITE);
+        prevButton.setTextSize(24);
+        prevButton.setAllCaps(false);
+        prevButton.setBackgroundColor(Color.TRANSPARENT);
+        prevButton.setOnClickListener(v -> viewerSwitch(-1));
+        viewerBar.addView(prevButton, new LinearLayout.LayoutParams(dp(64), -2));
+
+        viewerIndexLabel = label("", 13, Color.rgb(200, 206, 214));
+        viewerIndexLabel.setGravity(Gravity.CENTER);
+        viewerIndexLabel.setSingleLine(true);
+        viewerIndexLabel.setEllipsize(TextUtils.TruncateAt.MIDDLE);
+        viewerBar.addView(viewerIndexLabel, new LinearLayout.LayoutParams(0, -2, 1f));
+
+        Button nextButton = new Button(this);
+        nextButton.setText("›");
+        nextButton.setTextColor(Color.WHITE);
+        nextButton.setTextSize(24);
+        nextButton.setAllCaps(false);
+        nextButton.setBackgroundColor(Color.TRANSPARENT);
+        nextButton.setOnClickListener(v -> viewerSwitch(1));
+        viewerBar.addView(nextButton, new LinearLayout.LayoutParams(dp(64), -2));
+
+        FrameLayout.LayoutParams barParams = new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM);
+        barParams.bottomMargin = dp(24);
+        viewerOverlay.addView(viewerBar, barParams);
+
+        rootLayout.addView(viewerOverlay, new FrameLayout.LayoutParams(-1, -1));
+    }
+
+    private void viewerSwitch(int direction) {
+        if (viewerImages == null || viewerImages.isEmpty()) {
+            return;
+        }
+        int target = viewerPosition + direction;
+        if (target < 0 || target >= viewerImages.size()) {
+            Toast.makeText(this, target < 0 ? "已经是第一张" : "已经是最后一张", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        viewerShowImage(target);
+    }
+
+    private void viewerShowImage(int position) {
+        if (viewerImages == null || viewerImages.isEmpty()) {
+            return;
+        }
+        position = Math.max(0, Math.min(position, viewerImages.size() - 1));
+        viewerPosition = position;
+        final FileDoc doc = viewerImages.get(position);
+        final Uri uri = doc.uri;
+        viewerImage.setBitmap(null);
+        viewerIndexLabel.setText((position + 1) + " / " + viewerImages.size() + " · " + doc.name + " · 双指缩放");
+        final ZoomImageView target = viewerImage;
+        imageExecutor.execute(() -> {
+            Bitmap bitmap = decodeSampled(uri, 2048);
+            if (bitmap == null) {
+                return;
+            }
+            handler.post(() -> {
+                if (viewerOverlay != null && viewerOverlay.getVisibility() == View.VISIBLE
+                        && viewerImages.get(viewerPosition).uri.equals(uri)) {
+                    target.setBitmap(bitmap);
+                }
+            });
+        });
+    }
+
+    private void closeImageViewer() {
+        if (viewerOverlay == null || viewerOverlay.getVisibility() != View.VISIBLE) {
+            return;
+        }
+        viewerOverlay.setVisibility(View.GONE);
+        viewerImage.setBitmap(null);
+        currentImageIndex = viewerPosition;
+        showCurrentTrackImage();
+    }
+
+    private class ZoomImageView extends View {
+        private Bitmap bitmap;
+        private final Matrix drawMatrix = new Matrix();
+        private final ScaleGestureDetector scaleDetector;
+        private final GestureDetector gestureDetector;
+        private float minScale = 1f;
+        private float maxScale = 5f;
+        private float swipeAccumX;
+
+        ZoomImageView(Context context) {
+            super(context);
+            scaleDetector = new ScaleGestureDetector(context, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                @Override
+                public boolean onScale(ScaleGestureDetector detector) {
+                    float[] values = new float[9];
+                    drawMatrix.getValues(values);
+                    float current = values[Matrix.MSCALE_X];
+                    if (current <= 0f) {
+                        return true;
+                    }
+                    float target = Math.max(minScale, Math.min(maxScale, current * detector.getScaleFactor()));
+                    drawMatrix.postScale(target / current, target / current, detector.getFocusX(), detector.getFocusY());
+                    clampMatrix();
+                    invalidate();
+                    return true;
+                }
+            });
+            gestureDetector = new GestureDetector(context, new GestureDetector.SimpleOnGestureListener() {
+                @Override
+                public boolean onSingleTapConfirmed(MotionEvent event) {
+                    closeImageViewer();
+                    return true;
+                }
+
+                @Override
+                public boolean onDoubleTap(MotionEvent event) {
+                    float current = currentScale();
+                    if (current > minScale * 1.05f) {
+                        resetMatrix();
+                    } else {
+                        float target = Math.min(minScale * 2.5f, maxScale);
+                        drawMatrix.postScale(target / current, target / current, event.getX(), event.getY());
+                        clampMatrix();
+                        invalidate();
+                    }
+                    return true;
+                }
+
+                @Override
+                public boolean onScroll(MotionEvent event1, MotionEvent event2, float distanceX, float distanceY) {
+                    if (currentScale() > minScale + 0.02f) {
+                        drawMatrix.postTranslate(-distanceX, -distanceY);
+                        clampMatrix();
+                        invalidate();
+                    } else {
+                        swipeAccumX += -distanceX;
+                        if (Math.abs(swipeAccumX) > Math.max(dp(72), getWidth() / 4f)) {
+                            int direction = swipeAccumX < 0 ? 1 : -1;
+                            swipeAccumX = 0;
+                            viewerSwitch(direction);
+                        }
+                    }
+                    return true;
+                }
+            });
+        }
+
+        void setBitmap(Bitmap value) {
+            bitmap = value;
+            swipeAccumX = 0;
+            resetMatrix();
+            invalidate();
+        }
+
+        float currentScale() {
+            float[] values = new float[9];
+            drawMatrix.getValues(values);
+            return values[Matrix.MSCALE_X];
+        }
+
+        void resetMatrix() {
+            if (bitmap == null || getWidth() == 0 || getHeight() == 0) {
+                return;
+            }
+            float scale = Math.min(getWidth() / (float) bitmap.getWidth(), getHeight() / (float) bitmap.getHeight());
+            minScale = scale;
+            maxScale = scale * 5f;
+            drawMatrix.reset();
+            drawMatrix.postScale(scale, scale);
+            drawMatrix.postTranslate((getWidth() - bitmap.getWidth() * scale) / 2f,
+                    (getHeight() - bitmap.getHeight() * scale) / 2f);
+            invalidate();
+        }
+
+        private void clampMatrix() {
+            if (bitmap == null || getWidth() == 0 || getHeight() == 0) {
+                return;
+            }
+            float[] values = new float[9];
+            drawMatrix.getValues(values);
+            float scale = values[Matrix.MSCALE_X];
+            float tx = values[Matrix.MTRANS_X];
+            float ty = values[Matrix.MTRANS_Y];
+            float width = bitmap.getWidth() * scale;
+            float height = bitmap.getHeight() * scale;
+            float minX;
+            float maxX;
+            if (width <= getWidth()) {
+                minX = maxX = (getWidth() - width) / 2f;
+            } else {
+                maxX = 0f;
+                minX = getWidth() - width;
+            }
+            float minY;
+            float maxY;
+            if (height <= getHeight()) {
+                minY = maxY = (getHeight() - height) / 2f;
+            } else {
+                maxY = 0f;
+                minY = getHeight() - height;
+            }
+            values[Matrix.MTRANS_X] = Math.max(minX, Math.min(maxX, tx));
+            values[Matrix.MTRANS_Y] = Math.max(minY, Math.min(maxY, ty));
+            drawMatrix.setValues(values);
+        }
+
+        @Override
+        protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+            super.onSizeChanged(w, h, oldw, oldh);
+            resetMatrix();
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            if (bitmap != null) {
+                canvas.drawBitmap(bitmap, drawMatrix, null);
+            }
+        }
+
+        @Override
+        public boolean onTouchEvent(MotionEvent event) {
+            boolean handled = scaleDetector.onTouchEvent(event);
+            handled = gestureDetector.onTouchEvent(event) || handled;
+            return handled || super.onTouchEvent(event);
+        }
     }
 
     private boolean isSupportedAsset(String name) {
@@ -2667,6 +3001,36 @@ public class MainActivity extends Activity {
             BitmapFactory.Options options = new BitmapFactory.Options();
             options.inSampleSize = Math.max(1, sampleSize);
             options.inPreferredConfig = Bitmap.Config.RGB_565;
+            try (InputStream input = getContentResolver().openInputStream(uri)) {
+                if (input == null) {
+                    return null;
+                }
+                return BitmapFactory.decodeStream(input, null, options);
+            }
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private Bitmap decodeSampled(Uri uri, int maxDim) {
+        try {
+            BitmapFactory.Options bounds = new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            try (InputStream input = getContentResolver().openInputStream(uri)) {
+                if (input == null) {
+                    return null;
+                }
+                BitmapFactory.decodeStream(input, null, bounds);
+            }
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+                return null;
+            }
+            int sampleSize = 1;
+            while (bounds.outWidth / (sampleSize * 2) >= maxDim && bounds.outHeight / (sampleSize * 2) >= maxDim) {
+                sampleSize *= 2;
+            }
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inSampleSize = sampleSize;
             try (InputStream input = getContentResolver().openInputStream(uri)) {
                 if (input == null) {
                     return null;
@@ -2951,7 +3315,10 @@ public class MainActivity extends Activity {
 
         WorkItem toWork(Collator collator) {
             Collections.sort(audio, (left, right) -> collator.compare(left.relativePath, right.relativePath));
-            Collections.sort(images, (left, right) -> coverRank(left.name) - coverRank(right.name));
+            Collections.sort(images, (left, right) -> {
+                int rank = coverRank(left.name) - coverRank(right.name);
+                return rank != 0 ? rank : collator.compare(left.name, right.name);
+            });
             FileDoc cover = images.isEmpty() ? null : images.get(0);
             List<MediaItem> tracks = new ArrayList<>();
             for (FileDoc file : audio) {
@@ -2964,6 +3331,7 @@ public class MainActivity extends Activity {
 
         private List<FileDoc> collectImagesFor(FileDoc audioFile, FileDoc cover) {
             List<FileDoc> result = new ArrayList<>();
+            addUnique(result, cover);
             FileDoc sameName = imageByStem.get(stemStatic(audioFile.name));
             addUnique(result, sameName);
             for (FileDoc image : images) {
@@ -2974,7 +3342,6 @@ public class MainActivity extends Activity {
             for (FileDoc image : images) {
                 addUnique(result, image);
             }
-            addUnique(result, cover);
             return result;
         }
 
@@ -3005,10 +3372,17 @@ public class MainActivity extends Activity {
 
         private int coverRank(String name) {
             String lower = name.toLowerCase(Locale.ROOT);
-            if (lower.contains("cover") || lower.contains("folder") || lower.contains("main") || lower.contains("封面")) {
+            String stem = stemStatic(name);
+            if (stem.equals("fengmian") || stem.equals("fm") || stem.equals("cover") || stem.equals("folder")
+                    || stem.equals("main") || stem.equals("封面")
+                    || lower.startsWith("fengmian") || lower.contains("fengmian")
+                    || lower.contains("封面") || lower.contains("cover") || lower.contains("folder")) {
                 return 0;
             }
-            return 1;
+            if (RJ_CODE_PATTERN.matcher(lower).find()) {
+                return 1;
+            }
+            return 2;
         }
     }
 
@@ -3079,6 +3453,16 @@ public class MainActivity extends Activity {
             this.images = images;
             this.image = images.isEmpty() ? null : images.get(0);
             this.vtt = vtt;
+        }
+
+        void moveCoverFirst(FileDoc cover) {
+            for (int i = 0; i < images.size(); i++) {
+                if (images.get(i).uri.equals(cover.uri)) {
+                    images.remove(i);
+                    images.add(0, cover);
+                    break;
+                }
+            }
         }
     }
 

@@ -2271,6 +2271,12 @@ public class MainActivity extends Activity {
         // 否则快照在淡入中截取会得到半透明列表
         browserList.animate().cancel();
         browserList.setAlpha(1f);
+        // 筛选 chips 与覆盖动画同步：从上方滑入并淡入，避免突兀出现
+        filterBar.setAlpha(0f);
+        filterBar.setTranslationY(-dp(40));
+        filterBar.animate().alpha(1f).translationY(0f).setDuration(300)
+                .setInterpolator(new android.view.animation.DecelerateInterpolator())
+                .withEndAction(() -> filterBar.setTranslationY(0f)).start();
 
         browserList.post(() -> {
             int[] rootLocNow = new int[2];
@@ -2278,22 +2284,28 @@ public class MainActivity extends Activity {
             int[] posWorks = rectOnRoot(snapshotSource, rootLocNow);
             int worksH = snapshotSource.getHeight();
             Bitmap worksShot = snapshotView(snapshotSource);
+            // 裁剪容器固定在作品列表区域：快照在容器内部从上滑入，
+            // 超出部分被裁剪，全程不会遮挡标题、chips、迷你播放条
+            FrameLayout clipContainer = new FrameLayout(this);
+            clipContainer.setClickable(true);
+            clipContainer.setTranslationX(posWorks[0]);
+            clipContainer.setTranslationY(posWorks[1]);
+            rootLayout.addView(clipContainer,
+                    new FrameLayout.LayoutParams(listW, worksH, Gravity.TOP | Gravity.START));
             ImageView worksOverlay = new ImageView(this);
             worksOverlay.setImageBitmap(worksShot);
             worksOverlay.setBackgroundColor(colorBg);
             worksOverlay.setClickable(true);
-            rootLayout.addView(worksOverlay, new FrameLayout.LayoutParams(listW, worksH, Gravity.TOP | Gravity.START));
-            worksOverlay.setTranslationX(posWorks[0]);
-            // 从音轨列表顶部对齐处滑下，最终停在作品列表位置；
-            // 音轨覆盖层全程盖住列表区，动画结束后才一起移除
-            worksOverlay.setTranslationY(posTracks[1] - worksH);
-            worksOverlay.bringToFront();
-            worksOverlay.animate().translationY(posWorks[1])
+            clipContainer.addView(worksOverlay,
+                    new FrameLayout.LayoutParams(listW, worksH, Gravity.TOP | Gravity.START));
+            // 快照从容器顶部上方滑入，最终充满容器
+            worksOverlay.setTranslationY(-worksH);
+            worksOverlay.animate().translationY(0f)
                     .setDuration(300)
                     .setInterpolator(new android.view.animation.DecelerateInterpolator())
                     .withEndAction(() -> {
                         rootLayout.removeView(tracksOverlay);
-                        rootLayout.removeView(worksOverlay);
+                        rootLayout.removeView(clipContainer);
                         listSwipeBackAnimating = false;
                     }).start();
         });
@@ -2375,6 +2387,9 @@ public class MainActivity extends Activity {
         draggingListItem = false;
         updatePageChrome(true);
         browserAdapter.notifyDataSetChanged();
+        // 复位筛选条状态，滑动返回动画会在此基础上重新做过渡
+        filterBar.setAlpha(1f);
+        filterBar.setTranslationY(0f);
         setSectionHeader("作品列表", works.size() + " 个作品");
         titleView.setText(works.isEmpty() ? "没有识别到 ASMR 音频作品" : "作品列表");
         folderView.setText(works.size() + " 个作品");
@@ -2733,6 +2748,13 @@ public class MainActivity extends Activity {
         if (index < 0 || index >= playbackQueue.size()) {
             return;
         }
+        // 捕获切换前正在显示的图片，切歌后若无同名图则保持显示它
+        MediaItem prevTrack = currentPlaybackItem();
+        FileDoc prevShownImage = null;
+        if (prevTrack != null && !prevTrack.images.isEmpty()
+                && currentImageIndex >= 0 && currentImageIndex < prevTrack.images.size()) {
+            prevShownImage = prevTrack.images.get(currentImageIndex);
+        }
         currentIndex = index;
         if (openPlayerPage) {
             showPlayer();
@@ -2744,7 +2766,7 @@ public class MainActivity extends Activity {
         folderView.setText(playbackWork == null ? item.audio.parentPath : playbackWork.name);
         lyricView.setText(item.vtt == null ? "未找到字幕文件" : "字幕已载入");
         updateFloatingLyricText();
-        currentImageIndex = 0;
+        currentImageIndex = resolveImageIndexForCurrentAudio(prevShownImage);
         coverView.setTranslationX(0f);
         coverView.setAlpha(1f);
         imageSwitching = false;
@@ -3169,9 +3191,33 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** 打开播放页或切歌时决定显示的图片索引：优先与音频同名的图片，否则保持当前浏览的图片。 */
+    private int resolveImageIndexForCurrentAudio(FileDoc prevShown) {
+        MediaItem item = currentPlaybackItem();
+        if (item == null || item.images.isEmpty()) {
+            return 0;
+        }
+        String audioStem = stemStatic(item.audio.name);
+        if (!TextUtils.isEmpty(audioStem)) {
+            for (int i = 0; i < item.images.size(); i++) {
+                if (stemStatic(item.images.get(i).name).equalsIgnoreCase(audioStem)) {
+                    return i;
+                }
+            }
+        }
+        if (prevShown != null) {
+            for (int i = 0; i < item.images.size(); i++) {
+                if (item.images.get(i).uri.equals(prevShown.uri)) {
+                    return i;
+                }
+            }
+        }
+        return Math.max(0, Math.min(currentImageIndex, item.images.size() - 1));
+    }
+
     private boolean coverRelocationInFlight;
 
-    private void animateCoverRelocationIfNeeded(int prevIndex, int newIndex) {
+    private void animateCoverRelocationIfNeeded(int prevIndex, int newIndex, float fromOffsetX) {
         if (prevIndex == newIndex) {
             return;
         }
@@ -3186,9 +3232,9 @@ public class MainActivity extends Activity {
             return;
         }
         if (prevIndex == 0 && newIndex > 0) {
-            relocateCoverOverlay(cover, true);
+            relocateCoverOverlay(cover, true, fromOffsetX);
         } else if (prevIndex > 0 && newIndex == 0) {
-            relocateCoverOverlay(cover, false);
+            relocateCoverOverlay(cover, false, 0f);
         }
     }
 
@@ -3201,7 +3247,7 @@ public class MainActivity extends Activity {
         };
     }
 
-    private void relocateCoverOverlay(FileDoc cover, boolean toThumb) {
+    private void relocateCoverOverlay(FileDoc cover, boolean toThumb, float fromOffsetX) {
         final ImageView overlay = new ImageView(this);
         overlay.setScaleType(ImageView.ScaleType.FIT_CENTER);
         Bitmap cached = coverCache.get(cover.uri.toString());
@@ -3241,6 +3287,8 @@ public class MainActivity extends Activity {
             int dstH;
             if (toThumb) {
                 fromRect = fitRectOnRoot(coverView, rootLoc, aspectSource);
+                // 支持从封面被拖到的位置起飞，避免迁移与出场动画重复
+                fromRect[0] += Math.round(fromOffsetX);
                 toRect = rectOnRoot(coverTopThumb, rootLoc);
                 srcW = fromRect[2];
                 srcH = fromRect[3];
@@ -3401,6 +3449,10 @@ public class MainActivity extends Activity {
     }
 
     private void beginImageSettle(int dir, int target) {
+        MediaItem item = currentPlaybackItem();
+        if (item == null) {
+            return;
+        }
         imageAnimGeneration++;
         final int gen = imageAnimGeneration;
         imageSwitching = true;
@@ -3408,13 +3460,54 @@ public class MainActivity extends Activity {
         float startX = coverView.getTranslationX();
         float outX = -dir * width;
         long outDuration = Math.max(90, (long) (220 * Math.abs(startX - outX) / width));
+        FileDoc cover = playbackWork != null && playbackWork.cover != null
+                ? playbackWork.cover
+                : (!item.images.isEmpty() ? item.images.get(0) : null);
+        int prev = currentImageIndex;
+        if (prev == 0 && target > 0 && cover != null) {
+            // 离开封面：封面不做滑出，直接从当前拖动位置迁移到顶部缩略图；
+            // 新图立即换入并从侧面进场，避免同一张封面既出场又迁移造成重复
+            float dragX = coverView.getTranslationX();
+            currentImageIndex = target;
+            animateCoverRelocationIfNeeded(prev, target, dragX);
+            showCurrentTrackImage();
+            coverView.setTranslationX(dir * width);
+            coverView.animate().translationX(0f).setDuration(200)
+                    .setInterpolator(new android.view.animation.DecelerateInterpolator())
+                    .withEndAction(() -> {
+                        if (gen == imageAnimGeneration) {
+                            imageSwitching = false;
+                        }
+                    }).start();
+            return;
+        }
+        if (prev > 0 && target == 0 && cover != null) {
+            // 回到封面：旧图先滑出屏幕，结束后封面从缩略图飞向大图位置，
+            // 落地后才显示 coverView，避免进场的封面与飞行的封面重叠
+            currentImageIndex = target;
+            coverView.animate().translationX(outX).setDuration(outDuration).withEndAction(() -> {
+                if (gen != imageAnimGeneration) {
+                    return;
+                }
+                animateCoverRelocationIfNeeded(prev, target, 0f);
+                coverView.setTranslationX(0f);
+                coverView.setAlpha(0f);
+                showCurrentTrackImage();
+                handler.postDelayed(() -> {
+                    if (gen == imageAnimGeneration) {
+                        coverView.setAlpha(1f);
+                        imageSwitching = false;
+                    }
+                }, 320);
+            }).start();
+            return;
+        }
         coverView.animate().translationX(outX).setDuration(outDuration).withEndAction(() -> {
             if (gen != imageAnimGeneration) {
                 return;
             }
-            int prev = currentImageIndex;
             currentImageIndex = target;
-            animateCoverRelocationIfNeeded(prev, target);
+            animateCoverRelocationIfNeeded(prev, target, 0f);
             showCurrentTrackImage();
             coverView.setTranslationX(dir * width);
             coverView.animate().translationX(0f).setDuration(200).withEndAction(() -> {

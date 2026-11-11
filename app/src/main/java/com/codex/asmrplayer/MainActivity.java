@@ -172,6 +172,10 @@ public class MainActivity extends Activity {
     private TextView sectionSubtitleView;
     private ImageView coverView;
     private ImageView coverTopThumb;
+    private LinearLayout imageIndicator;
+    private TextView imageIndexText;
+    private GestureDetector playerImageGesture;
+    private boolean imageSwitching;
     private FrameLayout viewerOverlay;
     private ZoomImageView viewerImage;
     private TextView viewerIndexLabel;
@@ -357,6 +361,62 @@ public class MainActivity extends Activity {
         playerArea.setVisibility(View.GONE);
         contentPanel.addView(playerArea, new LinearLayout.LayoutParams(-1, 0, 1));
 
+        coverView = new ImageView(this);
+        coverView.setBackgroundColor(Color.rgb(31, 35, 41));
+        coverView.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        playerImageGesture = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
+            @Override
+            public boolean onSingleTapConfirmed(MotionEvent event) {
+                openImageViewer();
+                return true;
+            }
+
+            @Override
+            public boolean onFling(MotionEvent event1, MotionEvent event2, float velocityX, float velocityY) {
+                if (Math.abs(velocityX) > Math.abs(velocityY) * 1.2f && Math.abs(velocityX) > 600f) {
+                    switchPlayerImage(velocityX < 0 ? 1 : -1);
+                    return true;
+                }
+                return false;
+            }
+        });
+        coverView.setOnTouchListener((view, event) -> {
+            playerImageGesture.onTouchEvent(event);
+            return true;
+        });
+
+        FrameLayout imageHolder = new FrameLayout(this);
+        imageHolder.addView(coverView, new FrameLayout.LayoutParams(-1, -1));
+
+        imageIndicator = new LinearLayout(this);
+        imageIndicator.setOrientation(LinearLayout.HORIZONTAL);
+        imageIndicator.setGravity(Gravity.CENTER);
+        imageIndicator.setBackgroundColor(Color.argb(150, 0, 0, 0));
+        imageIndicator.setVisibility(View.GONE);
+        imageIndicator.addView(miniIndicatorButton("‹", -1), new LinearLayout.LayoutParams(dp(44), -1));
+        imageIndexText = label("", 12, Color.WHITE);
+        imageIndexText.setGravity(Gravity.CENTER);
+        imageIndexText.setMinWidth(dp(48));
+        imageIndicator.addView(imageIndexText, new LinearLayout.LayoutParams(-2, -1));
+        imageIndicator.addView(miniIndicatorButton("›", 1), new LinearLayout.LayoutParams(dp(44), -1));
+        FrameLayout.LayoutParams indicatorParams = new FrameLayout.LayoutParams(-2, dp(30), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        indicatorParams.bottomMargin = dp(10);
+        imageHolder.addView(imageIndicator, indicatorParams);
+
+        LinearLayout.LayoutParams coverParams = new LinearLayout.LayoutParams(-1, 0);
+        coverParams.weight = 1f;
+        coverParams.topMargin = dp(10);
+        playerArea.addView(imageHolder, coverParams);
+
+        LinearLayout infoPanel = panel();
+        LinearLayout.LayoutParams infoParams = new LinearLayout.LayoutParams(-1, dp(132));
+        infoParams.topMargin = dp(12);
+        playerArea.addView(infoPanel, infoParams);
+
+        LinearLayout infoHeader = new LinearLayout(this);
+        infoHeader.setOrientation(LinearLayout.HORIZONTAL);
+        infoHeader.setGravity(Gravity.CENTER_VERTICAL);
+
         coverTopThumb = new ImageView(this);
         coverTopThumb.setVisibility(View.GONE);
         coverTopThumb.setScaleType(ImageView.ScaleType.FIT_CENTER);
@@ -365,29 +425,16 @@ public class MainActivity extends Activity {
             currentImageIndex = 0;
             showCurrentTrackImage();
         });
-        LinearLayout.LayoutParams thumbParams = new LinearLayout.LayoutParams(dp(64), dp(64));
-        thumbParams.gravity = Gravity.CENTER_HORIZONTAL;
-        thumbParams.topMargin = dp(12);
-        playerArea.addView(coverTopThumb, thumbParams);
-
-        coverView = new ImageView(this);
-        coverView.setBackgroundColor(Color.rgb(31, 35, 41));
-        coverView.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        coverView.setOnClickListener(v -> openImageViewer());
-        LinearLayout.LayoutParams coverParams = new LinearLayout.LayoutParams(-1, 0);
-        coverParams.weight = 1f;
-        coverParams.topMargin = dp(10);
-        playerArea.addView(coverView, coverParams);
-
-        LinearLayout infoPanel = panel();
-        LinearLayout.LayoutParams infoParams = new LinearLayout.LayoutParams(-1, dp(132));
-        infoParams.topMargin = dp(12);
-        playerArea.addView(infoPanel, infoParams);
+        infoHeader.addView(coverTopThumb, new LinearLayout.LayoutParams(dp(40), dp(40)));
 
         titleView = label("请选择包含 RJ 作品文件夹的目录", 18, Color.WHITE);
         titleView.setSingleLine(true);
         titleView.setEllipsize(TextUtils.TruncateAt.END);
-        infoPanel.addView(titleView, new LinearLayout.LayoutParams(-1, dp(30)));
+        LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(-1, dp(40));
+        titleParams.leftMargin = dp(0);
+        infoHeader.addView(titleView, titleParams);
+
+        infoPanel.addView(infoHeader, new LinearLayout.LayoutParams(-1, dp(40)));
 
         folderView = label("会递归识别 mp3/wav、图片和 .vtt，并自动按作品分组。", 13, Color.rgb(184, 193, 202));
         folderView.setSingleLine(true);
@@ -2249,6 +2296,9 @@ public class MainActivity extends Activity {
         lyricView.setText(item.vtt == null ? "未找到同名 .vtt 字幕" : "字幕已载入");
         updateFloatingLyricText();
         currentImageIndex = 0;
+        coverView.setTranslationX(0f);
+        coverView.setAlpha(1f);
+        imageSwitching = false;
         showCurrentTrackImage();
         loadCues(item.vtt);
         currentCueIndex = -1;
@@ -2518,6 +2568,9 @@ public class MainActivity extends Activity {
 
     private void resetPlaybackUi() {
         coverView.setImageDrawable(null);
+        coverView.setTranslationX(0f);
+        coverView.setAlpha(1f);
+        imageSwitching = false;
         if (coverTopThumb != null) {
             coverTopThumb.setVisibility(View.GONE);
         }
@@ -2573,6 +2626,9 @@ public class MainActivity extends Activity {
         if (item == null) {
             coverView.setImageDrawable(null);
             coverTopThumb.setVisibility(View.GONE);
+            if (imageIndicator != null) {
+                imageIndicator.setVisibility(View.GONE);
+            }
             return;
         }
         FileDoc shown = null;
@@ -2588,15 +2644,53 @@ public class MainActivity extends Activity {
             coverView.setImageDrawable(null);
         }
         FileDoc cover = playbackWork != null ? playbackWork.cover : (item.images.isEmpty() ? null : item.images.get(0));
-        if (currentImageIndex > 0 && cover != null) {
-            coverTopThumb.setVisibility(View.VISIBLE);
+        boolean showThumb = currentImageIndex > 0 && cover != null;
+        coverTopThumb.setVisibility(showThumb ? View.VISIBLE : View.GONE);
+        if (showThumb) {
             loadCoverInto(coverTopThumb, cover);
-        } else {
-            coverTopThumb.setVisibility(View.GONE);
         }
+        LinearLayout.LayoutParams titleParams = (LinearLayout.LayoutParams) titleView.getLayoutParams();
+        titleParams.leftMargin = showThumb ? dp(10) : 0;
+        titleView.setLayoutParams(titleParams);
         if (item.images.size() > 1) {
-            statusView.setText("图片 " + (currentImageIndex + 1) + "/" + item.images.size() + " · 点击大图可全屏缩放");
+            imageIndicator.setVisibility(View.VISIBLE);
+            imageIndexText.setText((currentImageIndex + 1) + " / " + item.images.size());
+        } else {
+            imageIndicator.setVisibility(View.GONE);
         }
+    }
+
+    private void switchPlayerImage(int direction) {
+        MediaItem item = currentPlaybackItem();
+        if (pageMode != PAGE_PLAYER || item == null || item.images.size() <= 1 || imageSwitching) {
+            return;
+        }
+        int target = currentImageIndex + direction;
+        if (target < 0 || target >= item.images.size()) {
+            return;
+        }
+        imageSwitching = true;
+        float width = Math.max(dp(80), coverView.getWidth());
+        coverView.animate().translationX(-direction * width).alpha(0.1f).setDuration(160)
+                .withEndAction(() -> {
+                    currentImageIndex = target;
+                    showCurrentTrackImage();
+                    coverView.setTranslationX(direction * width);
+                    coverView.animate().translationX(0f).alpha(1f).setDuration(180)
+                            .withEndAction(() -> imageSwitching = false).start();
+                }).start();
+    }
+
+    private Button miniIndicatorButton(String text, int direction) {
+        Button button = new Button(this);
+        button.setText(text);
+        button.setTextColor(Color.WHITE);
+        button.setTextSize(14);
+        button.setAllCaps(false);
+        button.setBackgroundColor(Color.TRANSPARENT);
+        button.setPadding(0, 0, 0, 0);
+        button.setOnClickListener(v -> switchPlayerImage(direction));
+        return button;
     }
 
     private void showBigImage(FileDoc doc) {

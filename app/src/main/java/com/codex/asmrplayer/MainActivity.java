@@ -2242,46 +2242,47 @@ public class MainActivity extends Activity {
             return;
         }
         listSwipeBackAnimating = true;
-        View snapshotSource = contentPanel != null ? contentPanel : browserList;
-        // 快照裁掉底部导航栏（dp44 高 + dp4 边距），动画期间底导航保持真实 UI
-        // 静止显示，避免上层滑动快照与下层静止快照中的导航栏错位重影
-        int navStrip = dp(48);
-        int panelW = snapshotSource.getWidth();
-        int panelH = Math.max(1, snapshotSource.getHeight() - navStrip);
-        Bitmap tracksFull = snapshotView(snapshotSource);
-        Bitmap tracksShot = Bitmap.createBitmap(tracksFull, 0, 0, panelW, panelH);
-        if (tracksShot != tracksFull) {
-            tracksFull.recycle();
-        }
+        // 只快照列表本身：标题、筛选 chips、迷你播放条、底部导航保持真实 UI
+        // 静止显示，避免固定控件被快照捕获后随覆盖层滑动产生重影错乱
+        View snapshotSource = browserList;
+        int[] posTracks = rectOnRoot(snapshotSource, new int[2]);
+        int listW = snapshotSource.getWidth();
+        int tracksH = snapshotSource.getHeight();
+        Bitmap tracksShot = snapshotView(snapshotSource);
         ImageView tracksOverlay = new ImageView(this);
         tracksOverlay.setImageBitmap(tracksShot);
+        // ListView 快照的空白区是透明的，必须用页面背景色填死，
+        // 否则会透出下方真实列表造成条目残影
+        tracksOverlay.setBackgroundColor(colorBg);
         // 挡住触摸，避免动画期间穿透点到下方真实列表
         tracksOverlay.setClickable(true);
-        int[] pos = rectOnRoot(snapshotSource, new int[2]);
         FrameLayout.LayoutParams overlayParams =
-                new FrameLayout.LayoutParams(panelW, panelH, Gravity.TOP | Gravity.START);
-        tracksOverlay.setTranslationX(pos[0]);
-        tracksOverlay.setTranslationY(pos[1]);
+                new FrameLayout.LayoutParams(listW, tracksH, Gravity.TOP | Gravity.START);
+        tracksOverlay.setTranslationX(posTracks[0]);
+        tracksOverlay.setTranslationY(posTracks[1]);
         rootLayout.addView(tracksOverlay, overlayParams);
 
         showWorks();
+        // showWorks 会触发 180ms 淡入动画，立即取消并置为不透明，
+        // 否则快照在淡入中截取会得到半透明列表
+        browserList.animate().cancel();
+        browserList.setAlpha(1f);
 
         browserList.post(() -> {
-            Bitmap worksFull = snapshotView(snapshotSource);
-            Bitmap worksShot = Bitmap.createBitmap(worksFull, 0, 0, panelW, panelH);
-            if (worksShot != worksFull) {
-                worksFull.recycle();
-            }
+            int[] posWorks = rectOnRoot(snapshotSource, new int[2]);
+            int worksH = snapshotSource.getHeight();
+            Bitmap worksShot = snapshotView(snapshotSource);
             ImageView worksOverlay = new ImageView(this);
             worksOverlay.setImageBitmap(worksShot);
+            worksOverlay.setBackgroundColor(colorBg);
             worksOverlay.setClickable(true);
-            rootLayout.addView(worksOverlay, new FrameLayout.LayoutParams(panelW, panelH, Gravity.TOP | Gravity.START));
-            worksOverlay.setTranslationX(pos[0]);
-            worksOverlay.setTranslationY(pos[1] - panelH);
+            rootLayout.addView(worksOverlay, new FrameLayout.LayoutParams(listW, worksH, Gravity.TOP | Gravity.START));
+            worksOverlay.setTranslationX(posWorks[0]);
+            // 从音轨列表顶部对齐处滑下，最终停在作品列表位置；
+            // 音轨覆盖层全程盖住列表区，动画结束后才一起移除
+            worksOverlay.setTranslationY(posTracks[1] - worksH);
             worksOverlay.bringToFront();
-            // 音轨覆盖层全程盖住屏幕，作品页从上方滑下覆盖其上，
-            // 动画结束后才一起移除，避免中途露出真实页面造成跳变
-            worksOverlay.animate().translationY(pos[1])
+            worksOverlay.animate().translationY(posWorks[1])
                     .setDuration(300)
                     .setInterpolator(new android.view.animation.DecelerateInterpolator())
                     .withEndAction(() -> {

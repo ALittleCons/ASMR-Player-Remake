@@ -215,6 +215,12 @@ public class MainActivity extends Activity {
     private float imageDragBase;
     private int imageAnimGeneration;
     private VelocityTracker imageVelocityTracker;
+    /** 拖动切换图片时显示相邻图片的预览（同时触发预解码，避免松手后空白等待）。 */
+    private ImageView imagePeerView;
+    private int imagePeerIndex = -1;
+    private int imagePeerSide;
+    private float imagePeerBaseX;
+    private float imagePeerBaseY;
     private FrameLayout viewerOverlay;
     private ZoomImageView viewerImage;
     private TextView viewerIndexLabel;
@@ -412,6 +418,15 @@ public class MainActivity extends Activity {
             handleImageTouch(event);
             return true;
         });
+
+        // 拖动切图时的相邻图片预览层：与 coverView 同尺寸，跟随拖动显示目标图，
+        // 同时提前解码目标大图，使松手后 coverView 换图零延迟、动画无缝衔接
+        imagePeerView = new ImageView(this);
+        imagePeerView.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        imagePeerView.setVisibility(View.GONE);
+        imagePeerView.setClickable(false);
+        imagePeerView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        rootLayout.addView(imagePeerView, new FrameLayout.LayoutParams(0, 0, Gravity.TOP | Gravity.START));
 
         playerArea = new LinearLayout(this);
         playerArea.setOrientation(LinearLayout.VERTICAL);
@@ -2709,6 +2724,9 @@ public class MainActivity extends Activity {
         boolean playerVisible = myTab && pageMode == PAGE_PLAYER;
         boolean lyricsVisible = myTab && pageMode == PAGE_LYRICS;
         boolean listVisible = myTab && (pageMode == PAGE_WORKS || pageMode == PAGE_TRACKS);
+        if (!playerVisible) {
+            hideImagePeer(false);
+        }
         if (!playerVisible && coverTopThumb != null) {
             coverTopThumb.setVisibility(View.GONE);
         }
@@ -3289,6 +3307,23 @@ public class MainActivity extends Activity {
         final int[] rootLoc = new int[2];
         rootLayout.getLocationOnScreen(rootLoc);
         final Bitmap aspectSource = cached;
+        if (toThumb) {
+            // 立即把迁移 overlay 放在封面当前显示位置（起点不依赖缩略图布局），
+            // 消除松手后缩略图 post 布局完成前封面闪没的一帧
+            int[] startRect = fitRectOnRoot(coverView, rootLoc, aspectSource);
+            startRect[0] += Math.round(fromOffsetX);
+            if (startRect[2] > 0 && startRect[3] > 0) {
+                overlay.setTranslationX(startRect[0]);
+                overlay.setTranslationY(startRect[1]);
+                overlay.setPivotX(0f);
+                overlay.setPivotY(0f);
+                overlay.setScaleX(1f);
+                overlay.setScaleY(1f);
+                rootLayout.addView(overlay, new FrameLayout.LayoutParams(
+                        startRect[2], startRect[3], Gravity.TOP | Gravity.START));
+                overlay.bringToFront();
+            }
+        }
         coverTopThumb.post(() -> {
             int[] fromRect;
             int[] toRect;
@@ -3319,16 +3354,19 @@ public class MainActivity extends Activity {
                 rootLayout.removeView(overlay);
                 return;
             }
-            FrameLayout.LayoutParams overlayParams =
-                    new FrameLayout.LayoutParams(srcW, srcH, Gravity.TOP | Gravity.START);
-            overlay.setTranslationX(fromRect[0]);
-            overlay.setTranslationY(fromRect[1]);
-            overlay.setPivotX(0f);
-            overlay.setPivotY(0f);
-            overlay.setScaleX(1f);
-            overlay.setScaleY(1f);
-            rootLayout.addView(overlay, overlayParams);
-            overlay.bringToFront();
+            if (overlay.getParent() == null) {
+                // toThumb 分支已在 post 前立即添加；其余情况（回封面）此时添加
+                FrameLayout.LayoutParams overlayParams =
+                        new FrameLayout.LayoutParams(srcW, srcH, Gravity.TOP | Gravity.START);
+                overlay.setTranslationX(fromRect[0]);
+                overlay.setTranslationY(fromRect[1]);
+                overlay.setPivotX(0f);
+                overlay.setPivotY(0f);
+                overlay.setScaleX(1f);
+                overlay.setScaleY(1f);
+                rootLayout.addView(overlay, overlayParams);
+                overlay.bringToFront();
+            }
             overlay.animate().translationX(toRect[0]).translationY(toRect[1])
                     .scaleX(dstW / (float) srcW).scaleY(dstH / (float) srcH)
                     .setDuration(320)
@@ -3398,6 +3436,7 @@ public class MainActivity extends Activity {
                 imageSwitching = false;
                 imageAnimGeneration++;
             }
+            hideImagePeer(false);
             imageDragBase = coverView.getTranslationX();
             coverView.setAlpha(1f);
             return;
@@ -3417,6 +3456,7 @@ public class MainActivity extends Activity {
             if (imageHorizontalIntent) {
                 imageDragging = true;
                 coverView.setTranslationX(imageDragBase + dx);
+                updateImagePeer(item, dx);
             }
             return;
         }
@@ -3433,6 +3473,87 @@ public class MainActivity extends Activity {
                 imageHorizontalIntent = false;
                 settlePlayerImage(imageDragBase + (event.getRawX() - imageDownX), velocityX);
             }
+        }
+    }
+
+    /** 拖动时更新相邻图片预览：跟随 coverView 显示方向对应的目标图并预解码。 */
+    private void updateImagePeer(MediaItem item, float dx) {
+        if (item == null || item.images.size() <= 1) {
+            hideImagePeer(false);
+            return;
+        }
+        int side = dx < 0 ? 1 : -1;
+        int peerIdx = currentImageIndex + side;
+        if (peerIdx < 0 || peerIdx >= item.images.size()) {
+            hideImagePeer(false);
+            return;
+        }
+        if (imagePeerView.getVisibility() != View.VISIBLE
+                || imagePeerView.getWidth() != coverView.getWidth()
+                || imagePeerView.getHeight() != coverView.getHeight()) {
+            int[] rootLoc = new int[2];
+            rootLayout.getLocationOnScreen(rootLoc);
+            int[] pos = rectOnRoot(coverView, rootLoc);
+            imagePeerBaseX = pos[0];
+            imagePeerBaseY = pos[1];
+            FrameLayout.LayoutParams p = (FrameLayout.LayoutParams) imagePeerView.getLayoutParams();
+            p.width = coverView.getWidth();
+            p.height = coverView.getHeight();
+            imagePeerView.setLayoutParams(p);
+            imagePeerView.setTranslationY(imagePeerBaseY);
+        }
+        if (imagePeerView.getVisibility() != View.VISIBLE) {
+            imagePeerView.setTranslationX(imagePeerBaseX + coverView.getTranslationX() + side * coverView.getWidth());
+            imagePeerView.setVisibility(View.VISIBLE);
+            imagePeerView.bringToFront();
+        }
+        if (imagePeerSide != side) {
+            imagePeerSide = side;
+            imagePeerIndex = -1;
+        }
+        if (imagePeerIndex != peerIdx) {
+            imagePeerIndex = peerIdx;
+            loadPeerImage(item.images.get(peerIdx));
+        }
+        imagePeerView.setTranslationX(imagePeerBaseX + coverView.getTranslationX() + side * coverView.getWidth());
+    }
+
+    /** 加载预览图：优先缓存，未缓存时异步解码并回填（同时写入 bigImageCache 供松手后零延迟换图）。 */
+    private void loadPeerImage(FileDoc doc) {
+        Bitmap cached = bigImageCache.get(doc.uri.toString());
+        if (cached != null) {
+            imagePeerView.setImageBitmap(cached);
+            return;
+        }
+        imagePeerView.setImageDrawable(null);
+        imageExecutor.execute(() -> {
+            Bitmap bitmap = decodeSampled(doc.uri, 1440);
+            if (bitmap == null) {
+                return;
+            }
+            bigImageCache.put(doc.uri.toString(), bitmap);
+            handler.post(() -> imagePeerView.setImageBitmap(bitmap));
+        });
+    }
+
+    /** 隐藏相邻图片预览。slideOut=true 时向当前所在侧滑出，false 时立即消失。 */
+    private void hideImagePeer(boolean slideOut) {
+        int side = imagePeerSide;
+        imagePeerSide = 0;
+        if (imagePeerView == null || imagePeerView.getVisibility() != View.VISIBLE) {
+            imagePeerIndex = -1;
+            return;
+        }
+        imagePeerView.animate().cancel();
+        imagePeerIndex = -1;
+        if (slideOut) {
+            ImageView peer = imagePeerView;
+            float out = imagePeerBaseX + (side == -1 ? -1 : 1) * coverView.getWidth() * 1.2f;
+            peer.animate().translationX(out).setDuration(150)
+                    .withEndAction(() -> peer.setVisibility(View.GONE))
+                    .start();
+        } else {
+            imagePeerView.setVisibility(View.GONE);
         }
     }
 
@@ -3477,13 +3598,17 @@ public class MainActivity extends Activity {
         int prev = currentImageIndex;
         if (prev == 0 && target > 0 && cover != null) {
             // 离开封面：封面不做滑出，直接从当前拖动位置迁移到顶部缩略图；
-            // 新图立即换入并从侧面进场，避免同一张封面既出场又迁移造成重复
+            // 新图已在拖动时由预览层显示并预解码，松手后 coverView 接管预览
+            // 的位置（无缝），继续滑入到位
             float dragX = coverView.getTranslationX();
             currentImageIndex = target;
             animateCoverRelocationIfNeeded(prev, target, dragX);
             showCurrentTrackImage();
-            coverView.setTranslationX(dir * width);
-            coverView.animate().translationX(0f).setDuration(200)
+            hideImagePeer(false);
+            float enterX = dragX + dir * width;
+            coverView.setTranslationX(enterX);
+            long enterDuration = Math.max(90, (long) (200 * Math.abs(enterX) / width));
+            coverView.animate().translationX(0f).setDuration(enterDuration)
                     .setInterpolator(new android.view.animation.DecelerateInterpolator())
                     .withEndAction(() -> {
                         if (gen == imageAnimGeneration) {
@@ -3495,6 +3620,7 @@ public class MainActivity extends Activity {
         if (prev > 0 && target == 0 && cover != null) {
             // 回到封面：旧图先滑出屏幕，结束后封面从缩略图飞向大图位置，
             // 落地后才显示 coverView，避免进场的封面与飞行的封面重叠
+            hideImagePeer(false);
             currentImageIndex = target;
             coverView.animate().translationX(outX).setDuration(outDuration).withEndAction(() -> {
                 if (gen != imageAnimGeneration) {
@@ -3513,19 +3639,25 @@ public class MainActivity extends Activity {
             }).start();
             return;
         }
+        // 普通图片间切换：新图已由预览层显示在相邻位置，旧图滑出后
+        // coverView 直接接管预览位置继续滑入，避免从全宽外进场造成割裂
         coverView.animate().translationX(outX).setDuration(outDuration).withEndAction(() -> {
             if (gen != imageAnimGeneration) {
                 return;
             }
             currentImageIndex = target;
-            animateCoverRelocationIfNeeded(prev, target, 0f);
             showCurrentTrackImage();
-            coverView.setTranslationX(dir * width);
-            coverView.animate().translationX(0f).setDuration(200).withEndAction(() -> {
-                if (gen == imageAnimGeneration) {
-                    imageSwitching = false;
-                }
-            }).start();
+            hideImagePeer(false);
+            float enterX = startX + dir * width;
+            coverView.setTranslationX(enterX);
+            long enterDuration = Math.max(90, (long) (200 * Math.abs(enterX) / width));
+            coverView.animate().translationX(0f).setDuration(enterDuration)
+                    .setInterpolator(new android.view.animation.DecelerateInterpolator())
+                    .withEndAction(() -> {
+                        if (gen == imageAnimGeneration) {
+                            imageSwitching = false;
+                        }
+                    }).start();
         }).start();
     }
 
@@ -3533,6 +3665,17 @@ public class MainActivity extends Activity {
         imageAnimGeneration++;
         final int gen = imageAnimGeneration;
         imageSwitching = true;
+        // 预览层跟随封面一起弹回原位
+        if (imagePeerView != null && imagePeerView.getVisibility() == View.VISIBLE) {
+            ImageView peer = imagePeerView;
+            int side = imagePeerSide == -1 ? -1 : 1;
+            peer.animate().translationX(imagePeerBaseX + side * coverView.getWidth())
+                    .setDuration(180)
+                    .withEndAction(() -> peer.setVisibility(View.GONE))
+                    .start();
+            imagePeerSide = 0;
+            imagePeerIndex = -1;
+        }
         coverView.animate().translationX(0f).setDuration(180).withEndAction(() -> {
             if (gen == imageAnimGeneration) {
                 imageSwitching = false;
@@ -3791,6 +3934,7 @@ public class MainActivity extends Activity {
         }
         viewerImages = images;
         viewerPosition = Math.max(0, Math.min(currentImageIndex, images.size() - 1));
+        hideImagePeer(false);
         buildViewerOverlay();
         viewerOverlay.setVisibility(View.VISIBLE);
         viewerShowImage(viewerPosition);

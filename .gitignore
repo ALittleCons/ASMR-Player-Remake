@@ -14,3 +14,5 @@ RJ*/
 *.mp3
 *.wav
 *.vtt
+hs_err_pid*.log
+replay_pid*.log

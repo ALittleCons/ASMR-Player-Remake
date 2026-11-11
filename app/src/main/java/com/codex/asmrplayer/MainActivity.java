@@ -101,6 +101,7 @@ public class MainActivity extends Activity {
     private static final long POLL_INTERVAL_MS = 6000;
     private static final String KEY_LIBRARY_CACHE = "library_cache";
     private static final String KEY_FLOATING_LYRICS = "floating_lyrics";
+    private static final String KEY_FLOATING_LINES = "floating_lines";
     private static final String KEY_WEB_HISTORY = "web_history";
     private static final String KEY_RECENT_AUDIO = "recent_audio";
     private static final String KEY_DARK_THEME = "dark_theme";
@@ -161,8 +162,13 @@ public class MainActivity extends Activity {
     private LinearLayout settingsDrawer;
     private Button floatingLyricsButton;
     private WindowManager windowManager;
-    private TextView floatingLyricView;
+    private LinearLayout floatingLyricView;
     private WindowManager.LayoutParams floatingLyricParams;
+    private final TextView[] floatingLineViews = new TextView[3];
+    private int floatingLineCount = 1;
+    private String lastFloatingRenderKey;
+    // 静态引用用于清理孤儿悬浮窗（Activity 重建/异常泄漏时旧窗口残留导致双字幕）
+    private static View sFloatingLyricRoot;
 
     private boolean darkTheme;
     private int colorBg;
@@ -245,6 +251,8 @@ public class MainActivity extends Activity {
             workPlaceholder.setColor(colorTextSecondary);
         }
         floatingLyricsEnabled = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_FLOATING_LYRICS, false);
+        floatingLineCount = Math.max(1, Math.min(3,
+                getSharedPreferences(PREFS, MODE_PRIVATE).getInt(KEY_FLOATING_LINES, 1)));
         buildUi();
         loadWebHistory();
         loadRecentTracks();
@@ -255,6 +263,7 @@ public class MainActivity extends Activity {
 
         loadRoots();
         registerLibraryObserver();
+        refreshRootRows();
         refreshFilterBar();
         pollTick = () -> {
             if (activityResumed && !roots.isEmpty()) {
@@ -516,6 +525,7 @@ public class MainActivity extends Activity {
         browserList.setAdapter(browserAdapter);
         browserList.setOnItemClickListener(this::onListItemClick);
         browserList.setOnItemLongClickListener((parent, view, position, id) -> onListItemLongClick(position));
+        browserList.setSelector(new ColorDrawable(Color.TRANSPARENT));
         browserList.setOnTouchListener((v, event) -> handleListDrag(event));
         contentPanel.addView(browserList, new LinearLayout.LayoutParams(-1, 0, 1));
 
@@ -530,6 +540,7 @@ public class MainActivity extends Activity {
         lyricsList.setPadding(0, dp(6), 0, dp(12));
         lyricsList.setVisibility(View.GONE);
         lyricsList.setAdapter(lyricsAdapter);
+        lyricsList.setSelector(new ColorDrawable(Color.TRANSPARENT));
         lyricsList.setOnItemClickListener((parent, view, position, id) -> seekToCue(position));
         contentPanel.addView(lyricsList, new LinearLayout.LayoutParams(-1, 0, 1));
 
@@ -544,6 +555,7 @@ public class MainActivity extends Activity {
         recentList.setPadding(0, dp(6), 0, dp(12));
         recentList.setVisibility(View.GONE);
         recentList.setAdapter(recentAdapter);
+        recentList.setSelector(new ColorDrawable(Color.TRANSPARENT));
         recentList.setOnItemClickListener((parent, view, position, id) -> openRecentTrack(recentTracks.get(position)));
         contentPanel.addView(recentList, new LinearLayout.LayoutParams(-1, 0, 1));
 
@@ -633,28 +645,28 @@ public class MainActivity extends Activity {
     private void computeThemeColors() {
         if (darkTheme) {
             colorBg = Color.rgb(15, 18, 22);
-            colorTextPrimary = Color.rgb(242, 244, 247);
+            colorTextPrimary = Color.rgb(228, 232, 238);
             colorTextSecondary = Color.rgb(154, 163, 174);
             colorAccent = Color.rgb(242, 160, 61);
             colorCard = Color.rgb(23, 27, 33);
             colorCardStroke = Color.rgb(38, 44, 53);
             colorChip = Color.rgb(30, 35, 43);
-            colorIcon = Color.rgb(213, 219, 227);
+            colorIcon = Color.rgb(205, 211, 219);
             colorThumbBg = Color.rgb(34, 39, 47);
             colorWaveUnplayed = Color.rgb(42, 47, 56);
-            colorLyric = Color.rgb(210, 216, 224);
+            colorLyric = Color.rgb(204, 210, 218);
         } else {
             colorBg = Color.rgb(255, 255, 255);
-            colorTextPrimary = Color.rgb(27, 30, 35);
+            colorTextPrimary = Color.rgb(62, 66, 72);
             colorTextSecondary = Color.rgb(138, 145, 156);
             colorAccent = Color.rgb(242, 160, 61);
             colorCard = Color.rgb(255, 255, 255);
             colorCardStroke = Color.rgb(231, 234, 239);
             colorChip = Color.rgb(242, 244, 247);
-            colorIcon = Color.rgb(58, 64, 74);
+            colorIcon = Color.rgb(92, 98, 108);
             colorThumbBg = Color.rgb(237, 240, 244);
             colorWaveUnplayed = Color.rgb(226, 229, 234);
-            colorLyric = Color.rgb(42, 46, 52);
+            colorLyric = Color.rgb(86, 90, 97);
         }
     }
 
@@ -835,6 +847,19 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams floatingParams = new LinearLayout.LayoutParams(-1, dp(50));
         floatingParams.topMargin = dp(10);
         area.addView(floatingLyricsButton, floatingParams);
+
+        Button lineCountButton = drawerButton("台词行数  " + floatingLineCount + " 行");
+        lineCountButton.setOnClickListener(v -> {
+            floatingLineCount = floatingLineCount % 3 + 1;
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .putInt(KEY_FLOATING_LINES, floatingLineCount).apply();
+            lineCountButton.setText("台词行数  " + floatingLineCount + " 行");
+            lastFloatingRenderKey = null;
+            updateFloatingLyricText();
+        });
+        LinearLayout.LayoutParams lineCountParams = new LinearLayout.LayoutParams(-1, dp(50));
+        lineCountParams.topMargin = dp(10);
+        area.addView(lineCountButton, lineCountParams);
 
         TextView hint = label("台词悬浮开启后会显示在手机页面上层，切到后台也会继续播放并更新台词，可拖动调整位置。", 13, colorTextSecondary);
         hint.setMaxLines(4);
@@ -1089,19 +1114,39 @@ public class MainActivity extends Activity {
             updateFloatingLyricText();
             return;
         }
+        // 清理可能残留的孤儿悬浮窗，避免出现双字幕
+        if (sFloatingLyricRoot != null) {
+            try {
+                WindowManager wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+                if (wm != null) {
+                    wm.removeView(sFloatingLyricRoot);
+                }
+            } catch (Exception ignored) {
+            }
+            sFloatingLyricRoot = null;
+        }
         windowManager = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
         if (windowManager == null) {
             return;
         }
-        floatingLyricView = new TextView(this);
-        floatingLyricView.setTextColor(Color.WHITE);
-        floatingLyricView.setTextSize(15);
-        floatingLyricView.setGravity(Gravity.CENTER);
-        floatingLyricView.setPadding(dp(14), dp(10), dp(14), dp(10));
-        floatingLyricView.setMaxLines(4);
-        floatingLyricView.setBackgroundColor(Color.argb(150, 16, 18, 21));
-        floatingLyricView.setText("台词悬浮已开启");
-        floatingLyricView.setOnTouchListener(new View.OnTouchListener() {
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setGravity(Gravity.CENTER);
+        box.setPadding(dp(14), dp(8), dp(14), dp(8));
+        box.setBackgroundColor(Color.argb(150, 16, 18, 21));
+        for (int i = 0; i < floatingLineViews.length; i++) {
+            TextView line = new TextView(this);
+            line.setTextSize(i == 1 ? 15 : 13);
+            line.setGravity(Gravity.CENTER);
+            line.setSingleLine(false);
+            line.setMaxLines(2);
+            line.setEllipsize(TextUtils.TruncateAt.END);
+            floatingLineViews[i] = line;
+            box.addView(line, new LinearLayout.LayoutParams(-2, -2));
+        }
+        floatingLyricView = box;
+        box.setOnTouchListener(new View.OnTouchListener() {
             private int startX;
             private int startY;
             private float downX;
@@ -1145,9 +1190,12 @@ public class MainActivity extends Activity {
         floatingLyricParams.y = dp(120);
         try {
             windowManager.addView(floatingLyricView, floatingLyricParams);
+            sFloatingLyricRoot = floatingLyricView;
+            lastFloatingRenderKey = null;
             updateFloatingLyricText();
         } catch (Exception ex) {
             floatingLyricView = null;
+            java.util.Arrays.fill(floatingLineViews, null);
             Toast.makeText(this, "无法显示悬浮台词: " + ex.getMessage(), Toast.LENGTH_LONG).show();
         }
     }
@@ -1155,6 +1203,8 @@ public class MainActivity extends Activity {
     private void hideFloatingLyrics() {
         if (floatingLyricView == null || windowManager == null) {
             floatingLyricView = null;
+            sFloatingLyricRoot = null;
+            java.util.Arrays.fill(floatingLineViews, null);
             return;
         }
         try {
@@ -1163,22 +1213,65 @@ public class MainActivity extends Activity {
         }
         floatingLyricView = null;
         floatingLyricParams = null;
+        sFloatingLyricRoot = null;
+        java.util.Arrays.fill(floatingLineViews, null);
+        lastFloatingRenderKey = null;
     }
 
     private void updateFloatingLyricText() {
-        if (floatingLyricView == null) {
+        if (floatingLineViews[1] == null) {
             return;
         }
-        CharSequence text = lyricView == null ? "" : lyricView.getText();
-        if (TextUtils.isEmpty(text)) {
-            MediaItem current = currentPlaybackItem();
-            if (current != null) {
-                text = current.audio.name;
-            } else {
-                text = "等待播放台词";
-            }
+        MediaItem current = currentPlaybackItem();
+        boolean hasCues = current != null && !cues.isEmpty();
+        int idx = hasCues ? currentCueIndex : -1;
+        String line0;
+        String line1;
+        String line2;
+        if (!hasCues || idx < 0) {
+            String fallback = current == null ? "等待播放台词" : current.audio.name;
+            line0 = null;
+            line1 = fallback;
+            line2 = null;
+        } else if (floatingLineCount == 1) {
+            line0 = null;
+            line1 = cues.get(idx).text;
+            line2 = null;
+        } else if (floatingLineCount == 2) {
+            line0 = null;
+            line1 = cues.get(idx).text;
+            line2 = idx + 1 < cues.size() ? cues.get(idx + 1).text : null;
+        } else {
+            line0 = idx - 1 >= 0 ? cues.get(idx - 1).text : null;
+            line1 = cues.get(idx).text;
+            line2 = idx + 1 < cues.size() ? cues.get(idx + 1).text : null;
         }
-        floatingLyricView.setText(text);
+        StringBuilder keyBuilder = new StringBuilder();
+        keyBuilder.append(floatingLineCount).append('|').append(line0).append('|').append(line1).append('|').append(line2);
+        String key = keyBuilder.toString();
+        if (key.equals(lastFloatingRenderKey)) {
+            return;
+        }
+        lastFloatingRenderKey = key;
+        setFloatingLine(0, line0, false);
+        setFloatingLine(1, line1, idx >= 0);
+        setFloatingLine(2, line2, false);
+    }
+
+    private void setFloatingLine(int index, String text, boolean highlight) {
+        TextView line = floatingLineViews[index];
+        if (line == null) {
+            return;
+        }
+        if (TextUtils.isEmpty(text)) {
+            line.setVisibility(View.GONE);
+            line.setText("");
+            return;
+        }
+        line.setVisibility(View.VISIBLE);
+        line.setText(text);
+        line.setTextColor(highlight ? Color.WHITE : Color.argb(210, 190, 196, 205));
+        line.setTypeface(null, highlight ? Typeface.BOLD : Typeface.NORMAL);
     }
 
     private void loadBrowserUrl(String rawUrl) {
@@ -2048,6 +2141,9 @@ public class MainActivity extends Activity {
 
     private boolean handleListDrag(MotionEvent event) {
         if (!draggingListItem) {
+            if (currentTab == TAB_MY && pageMode == PAGE_TRACKS) {
+                return handleTracksSwipeBack(event);
+            }
             return false;
         }
         if (event.getAction() == MotionEvent.ACTION_MOVE) {
@@ -2068,8 +2164,7 @@ public class MainActivity extends Activity {
         return true;
     }
 
-    private void finishListDrag() {
-        if (!draggingListItem) {
+    private void finishListDrag() {        if (!draggingListItem) {
             return;
         }
         boolean movedWork = movingWorkIndex >= 0;
@@ -2086,6 +2181,102 @@ public class MainActivity extends Activity {
             sectionSubtitleView.setText("已保存音轨顺序");
             statusView.setText("已移动音轨");
         }
+    }
+
+    private int listSwipeBackDownX;
+    private int listSwipeBackDownY;
+    private boolean listSwipeBackActive;
+    private boolean listSwipeBackAnimating;
+
+    /** 音轨列表左右滑动返回作品列表的手势检测。 */
+    private boolean handleTracksSwipeBack(MotionEvent event) {
+        if (listSwipeBackAnimating) {
+            return true;
+        }
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) {
+            listSwipeBackDownX = (int) event.getRawX();
+            listSwipeBackDownY = (int) event.getRawY();
+            listSwipeBackActive = false;
+            return false;
+        }
+        if (action == MotionEvent.ACTION_MOVE) {
+            float dx = event.getRawX() - listSwipeBackDownX;
+            float dy = event.getRawY() - listSwipeBackDownY;
+            if (!listSwipeBackActive
+                    && Math.abs(dx) > dp(18) && Math.abs(dx) > Math.abs(dy) * 1.2f) {
+                listSwipeBackActive = true;
+                // 直接给 ListView 的 onTouchEvent 发 CANCEL，绕过本 view 的触摸监听，
+                // 清除其按压/点击状态，避免松手时误触发条目点击或长按拖动
+                MotionEvent cancel = MotionEvent.obtain(event);
+                cancel.setAction(MotionEvent.ACTION_CANCEL);
+                browserList.onTouchEvent(cancel);
+                cancel.recycle();
+            }
+            return listSwipeBackActive;
+        }
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            boolean wasActive = listSwipeBackActive;
+            float dx = Math.abs(event.getRawX() - listSwipeBackDownX);
+            listSwipeBackActive = false;
+            if (wasActive && action == MotionEvent.ACTION_UP && dx > dp(70)) {
+                animateTracksBackToWorks();
+                return true;
+            }
+            return wasActive;
+        }
+        return false;
+    }
+
+    private Bitmap snapshotView(View view) {
+        Bitmap bitmap = Bitmap.createBitmap(
+                Math.max(1, view.getWidth()), Math.max(1, view.getHeight()), Bitmap.Config.ARGB_8888);
+        android.graphics.Canvas canvas = new android.graphics.Canvas(bitmap);
+        view.draw(canvas);
+        return bitmap;
+    }
+
+    /** 音轨列表 → 作品列表的上下覆盖切换动画。 */
+    private void animateTracksBackToWorks() {
+        if (listSwipeBackAnimating) {
+            return;
+        }
+        listSwipeBackAnimating = true;
+        View snapshotSource = contentPanel != null ? contentPanel : browserList;
+        Bitmap tracksShot = snapshotView(snapshotSource);
+        ImageView tracksOverlay = new ImageView(this);
+        tracksOverlay.setImageBitmap(tracksShot);
+        int[] pos = rectOnRoot(snapshotSource, new int[2]);
+        int panelW = snapshotSource.getWidth();
+        int panelH = snapshotSource.getHeight();
+        FrameLayout.LayoutParams overlayParams =
+                new FrameLayout.LayoutParams(panelW, panelH, Gravity.TOP | Gravity.START);
+        tracksOverlay.setTranslationX(pos[0]);
+        tracksOverlay.setTranslationY(pos[1]);
+        rootLayout.addView(tracksOverlay, overlayParams);
+        tracksOverlay.bringToFront();
+
+        showWorks();
+        browserList.animate().cancel();
+        browserList.setAlpha(1f);
+
+        browserList.post(() -> {
+            Bitmap worksShot = snapshotView(snapshotSource);
+            ImageView worksOverlay = new ImageView(this);
+            worksOverlay.setImageBitmap(worksShot);
+            rootLayout.addView(worksOverlay, new FrameLayout.LayoutParams(panelW, panelH, Gravity.TOP | Gravity.START));
+            worksOverlay.setTranslationX(pos[0]);
+            worksOverlay.setTranslationY(pos[1] - panelH);
+            worksOverlay.bringToFront();
+            rootLayout.removeView(tracksOverlay);
+            worksOverlay.animate().translationY(pos[1])
+                    .setDuration(300)
+                    .setInterpolator(new android.view.animation.DecelerateInterpolator())
+                    .withEndAction(() -> {
+                        rootLayout.removeView(worksOverlay);
+                        listSwipeBackAnimating = false;
+                    }).start();
+        });
     }
 
     private void moveWorkDuringDrag(int from, int to) {
@@ -2220,7 +2411,7 @@ public class MainActivity extends Activity {
 
     private void showLyrics() {
         if (cues.isEmpty()) {
-            Toast.makeText(this, "当前音轨没有可查看的 .vtt 台词", Toast.LENGTH_SHORT).show();
+            Toast.makeText(this, "当前音轨没有可查看的台词（支持 .vtt / .lrc）", Toast.LENGTH_SHORT).show();
             return;
         }
         currentTab = TAB_MY;
@@ -2531,7 +2722,7 @@ public class MainActivity extends Activity {
         recordRecentTrack(item, playbackWork);
         titleView.setText(item.audio.name);
         folderView.setText(playbackWork == null ? item.audio.parentPath : playbackWork.name);
-        lyricView.setText(item.vtt == null ? "未找到同名 .vtt 字幕" : "字幕已载入");
+        lyricView.setText(item.vtt == null ? "未找到字幕文件" : "字幕已载入");
         updateFloatingLyricText();
         currentImageIndex = 0;
         coverView.setTranslationX(0f);
@@ -2676,9 +2867,9 @@ public class MainActivity extends Activity {
             return;
         }
         Cue activeCue = cues.get(activeIndex);
-        if (!activeCue.text.contentEquals(lyricView.getText())) {
+        boolean textChanged = !activeCue.text.contentEquals(lyricView.getText());
+        if (textChanged) {
             lyricView.setText(activeCue.text);
-            updateFloatingLyricText();
         }
         if (currentCueIndex != activeIndex) {
             currentCueIndex = activeIndex;
@@ -2686,6 +2877,9 @@ public class MainActivity extends Activity {
             if (pageMode == PAGE_LYRICS) {
                 lyricsList.smoothScrollToPosition(activeIndex);
             }
+        }
+        if (textChanged || currentCueIndex == activeIndex) {
+            updateFloatingLyricText();
         }
     }
 
@@ -2698,12 +2892,13 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void loadCues(FileDoc vtt) {
+    private void loadCues(FileDoc subtitleFile) {
         cues.clear();
-        if (vtt == null) {
+        if (subtitleFile == null) {
             return;
         }
-        try (InputStream input = getContentResolver().openInputStream(vtt.uri)) {
+        boolean isLrc = subtitleFile.name.toLowerCase(Locale.ROOT).endsWith(".lrc");
+        try (InputStream input = getContentResolver().openInputStream(subtitleFile.uri)) {
             if (input == null) {
                 return;
             }
@@ -2713,13 +2908,46 @@ public class MainActivity extends Activity {
             if (text.startsWith("\uFEFF")) {
                 text = text.substring(1);
             }
-            String[] blocks = text.split("\n\n+");
-            for (String block : blocks) {
-                parseCueBlock(block.trim());
+            if (isLrc) {
+                parseLrcLines(text);
+            } else {
+                String[] blocks = text.split("\n\n+");
+                for (String block : blocks) {
+                    parseCueBlock(block.trim());
+                }
             }
+            cues.sort((left, right) -> Long.compare(left.startMs, right.startMs));
             lyricsAdapter.notifyDataSetChanged();
         } catch (Exception ex) {
             Toast.makeText(this, "字幕读取失败: " + ex.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    /** 解析 LRC：一行可带多个 [mm:ss.xx] 时间标签。 */
+    private void parseLrcLines(String text) {
+        java.util.regex.Pattern tagPattern = java.util.regex.Pattern.compile("\\[(\\d{1,2}:\\d{1,2}(?:[.:]\\d{1,3})?)\\]");
+        for (String rawLine : text.split("\n")) {
+            String line = rawLine.trim();
+            if (line.isEmpty() || line.startsWith("[") && !tagPattern.matcher(line).find()) {
+                continue;
+            }
+            java.util.regex.Matcher matcher = tagPattern.matcher(line);
+            List<Long> starts = new ArrayList<>();
+            int textStart = 0;
+            while (matcher.find()) {
+                try {
+                    starts.add(parseTimestamp(matcher.group(1).replace(',', '.')));
+                } catch (Exception ignored) {
+                }
+                textStart = matcher.end();
+            }
+            String content = line.substring(textStart).trim();
+            if (starts.isEmpty() || TextUtils.isEmpty(content) || content.startsWith("<")) {
+                continue;
+            }
+            for (long start : starts) {
+                cues.add(new Cue(start, start + 5000, content));
+            }
         }
     }
 
@@ -2955,7 +3183,7 @@ public class MainActivity extends Activity {
 
     private void relocateCoverOverlay(FileDoc cover, boolean toThumb) {
         final ImageView overlay = new ImageView(this);
-        overlay.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        overlay.setScaleType(ImageView.ScaleType.FIT_CENTER);
         Bitmap cached = coverCache.get(cover.uri.toString());
         if (cached == null) {
             cached = decodeThumbnail(cover.uri, dp(72));
@@ -2973,25 +3201,40 @@ public class MainActivity extends Activity {
         if (toThumb) {
             coverTopThumb.setVisibility(View.VISIBLE);
             coverTopThumb.setAlpha(0f);
+        } else {
+            // 预先把封面大图放进 coverView（若已缓存），保证滑动切入时内容与飞行动画一致
+            Bitmap big = bigImageCache.get(cover.uri.toString());
+            if (big != null) {
+                coverView.setImageBitmap(big);
+            }
         }
 
         final int[] rootLoc = new int[2];
         rootLayout.getLocationOnScreen(rootLoc);
+        final Bitmap aspectSource = cached;
         coverTopThumb.post(() -> {
             int[] fromRect;
             int[] toRect;
+            int srcW;
+            int srcH;
+            int dstW;
+            int dstH;
             if (toThumb) {
-                fromRect = rectOnRoot(coverView, rootLoc);
+                fromRect = fitRectOnRoot(coverView, rootLoc, aspectSource);
                 toRect = rectOnRoot(coverTopThumb, rootLoc);
+                srcW = fromRect[2];
+                srcH = fromRect[3];
+                dstW = coverTopThumb.getWidth();
+                dstH = coverTopThumb.getHeight();
             } else {
                 fromRect = rectOnRoot(coverTopThumb, rootLoc);
-                toRect = rectOnRoot(coverView, rootLoc);
+                toRect = fitRectOnRoot(coverView, rootLoc, aspectSource);
+                srcW = coverTopThumb.getWidth();
+                srcH = coverTopThumb.getHeight();
+                dstW = toRect[2];
+                dstH = toRect[3];
                 coverTopThumb.setVisibility(View.GONE);
             }
-            int srcW = toThumb ? coverView.getWidth() : coverTopThumb.getWidth();
-            int srcH = toThumb ? coverView.getHeight() : coverTopThumb.getHeight();
-            int dstW = toThumb ? coverTopThumb.getWidth() : coverView.getWidth();
-            int dstH = toThumb ? coverTopThumb.getHeight() : coverView.getHeight();
             if (srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0) {
                 finishCoverRelocation(toThumb);
                 rootLayout.removeView(overlay);
@@ -3016,6 +3259,32 @@ public class MainActivity extends Activity {
                         rootLayout.removeView(overlay);
                     }).start();
         });
+    }
+
+    /** 计算 bitmap 在 view 内按 FIT_CENTER 展示时的实际显示矩形（root 坐标 x,y,宽,高）。 */
+    private int[] fitRectOnRoot(View view, int[] rootLoc, Bitmap bitmap) {
+        int[] pos = rectOnRoot(view, rootLoc);
+        int w = view.getWidth();
+        int h = view.getHeight();
+        int innerW = w;
+        int innerH = h;
+        if (bitmap != null && w > 0 && h > 0) {
+            float aspect = bitmap.getWidth() / (float) bitmap.getHeight();
+            float viewAspect = w / (float) h;
+            if (viewAspect > aspect) {
+                innerH = h;
+                innerW = Math.round(h * aspect);
+            } else {
+                innerW = w;
+                innerH = Math.round(w / aspect);
+            }
+        }
+        return new int[]{
+                pos[0] + (w - innerW) / 2,
+                pos[1] + (h - innerH) / 2,
+                innerW,
+                innerH
+        };
     }
 
     private void finishCoverRelocation(boolean toThumb) {
@@ -3727,7 +3996,8 @@ public class MainActivity extends Activity {
     }
 
     private boolean isSupportedAsset(String name) {
-        return isAudio(name) || isImage(name.toLowerCase(Locale.ROOT)) || name.toLowerCase(Locale.ROOT).endsWith(".vtt");
+        String lower = name.toLowerCase(Locale.ROOT);
+        return isAudio(name) || isImage(lower) || lower.endsWith(".vtt") || lower.endsWith(".lrc");
     }
 
     private boolean isAudio(String name) {
@@ -3987,7 +4257,7 @@ public class MainActivity extends Activity {
 
             String subtitle = position == movingTrackIndex
                     ? "拖动中 · 松开保存位置"
-                    : (item.vtt == null ? "无字幕" : "VTT") + " · " + item.audio.parentPath;
+                    : (item.vtt == null ? "无字幕" : "有字幕") + " · " + item.audio.parentPath;
             holder.subtitle.setText(subtitle);
             holder.subtitle.setTextColor(position == movingTrackIndex ? colorAccent : colorTextSecondary);
             return row;
@@ -4133,6 +4403,7 @@ public class MainActivity extends Activity {
         final List<FileDoc> audio = new ArrayList<>();
         final List<FileDoc> images = new ArrayList<>();
         final Map<String, FileDoc> vttByName = new HashMap<>();
+        final Map<String, FileDoc> lrcByName = new HashMap<>();
         final Map<String, FileDoc> imageByStem = new HashMap<>();
 
         WorkBuilder(String key, String name) {
@@ -4145,6 +4416,9 @@ public class MainActivity extends Activity {
             if (lower.endsWith(".vtt")) {
                 vttByName.put(lower, file);
                 vttByName.put(stemStatic(file.name), file);
+            } else if (lower.endsWith(".lrc")) {
+                lrcByName.put(lower, file);
+                lrcByName.put(stemStatic(file.name), file);
             } else if (lower.endsWith(".mp3") || lower.endsWith(".wav")) {
                 audio.add(file);
             } else if (isImageStatic(lower)) {
@@ -4199,15 +4473,28 @@ public class MainActivity extends Activity {
 
         private FileDoc findVtt(FileDoc audioFile) {
             String lower = audioFile.name.toLowerCase(Locale.ROOT);
+            String stem = stemStatic(audioFile.name);
             FileDoc exact = vttByName.get(lower + ".vtt");
             if (exact != null) {
                 return exact;
             }
-            exact = vttByName.get(stemStatic(audioFile.name) + ".vtt");
+            exact = vttByName.get(stem + ".vtt");
             if (exact != null) {
                 return exact;
             }
-            return vttByName.get(stemStatic(audioFile.name));
+            exact = vttByName.get(stem);
+            if (exact != null) {
+                return exact;
+            }
+            FileDoc lrc = lrcByName.get(lower + ".lrc");
+            if (lrc != null) {
+                return lrc;
+            }
+            lrc = lrcByName.get(stem + ".lrc");
+            if (lrc != null) {
+                return lrc;
+            }
+            return lrcByName.get(stem);
         }
 
         private int coverRank(String name) {

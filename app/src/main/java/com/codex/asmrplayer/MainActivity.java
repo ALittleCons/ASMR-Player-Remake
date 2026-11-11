@@ -97,6 +97,7 @@ public class MainActivity extends Activity {
     private static final String PREFS = "asmr_pocket_prefs";
     private static final String KEY_TREE_URI = "tree_uri";
     private static final String KEY_TREE_URIS = "tree_uris";
+    private static final String KEY_NET_SOURCES = "net_sources";
     private static final long RESCAN_DEBOUNCE_MS = 1200;
     private static final java.util.regex.Pattern RJ_CODE_PATTERN = java.util.regex.Pattern.compile("rj\\d{2,}");
     private static final long POLL_INTERVAL_MS = 6000;
@@ -150,6 +151,7 @@ public class MainActivity extends Activity {
     private int pageMode = PAGE_WORKS;
 
     private final List<RootInfo> roots = new ArrayList<>();
+    private final List<NetSource> netSources = new ArrayList<>();
     private int filterRootIndex = -1;
     private final ExecutorService scanExecutor = Executors.newSingleThreadExecutor();
     private final AtomicBoolean scanInFlight = new AtomicBoolean(false);
@@ -270,6 +272,8 @@ public class MainActivity extends Activity {
         }
 
         loadRoots();
+        StreamProxy.get().start();
+        syncProxySources();
         registerLibraryObserver();
         refreshRootRows();
         refreshFilterBar();
@@ -559,6 +563,7 @@ public class MainActivity extends Activity {
         lyricsList.setAdapter(lyricsAdapter);
         lyricsList.setSelector(new ColorDrawable(Color.TRANSPARENT));
         lyricsList.setOnItemClickListener((parent, view, position, id) -> seekToCue(position));
+        lyricsList.setOnTouchListener((v, event) -> handleLyricsSwipeBack(event));
         contentPanel.addView(lyricsList, new LinearLayout.LayoutParams(-1, 0, 1));
 
         recentList = new ListView(this);
@@ -839,6 +844,10 @@ public class MainActivity extends Activity {
         addParams.topMargin = dp(10);
         area.addView(addFolder, addParams);
 
+        Button addNetwork = drawerButton("添加网络路径 (SMB/FTP)");
+        addNetwork.setOnClickListener(v -> showNetSourceDialog());
+        area.addView(addNetwork, new LinearLayout.LayoutParams(-1, dp(50)));
+
         Button rescanButton = drawerButton("重新扫描");
         rescanButton.setOnClickListener(v -> {
             if (roots.isEmpty()) {
@@ -957,6 +966,13 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams chooseParams = new LinearLayout.LayoutParams(-1, dp(48));
         chooseParams.topMargin = dp(12);
         settingsDrawer.addView(chooseFolder, chooseParams);
+
+        Button chooseNetwork = drawerButton("添加网络路径 (SMB/FTP)");
+        chooseNetwork.setOnClickListener(v -> {
+            hideSettingsDrawer();
+            showNetSourceDialog();
+        });
+        settingsDrawer.addView(chooseNetwork, new LinearLayout.LayoutParams(-1, dp(48)));
 
         floatingLyricsButton = drawerButton("台词悬浮");
         floatingLyricsButton.setOnClickListener(v -> toggleFloatingLyrics());
@@ -1497,20 +1513,164 @@ public class MainActivity extends Activity {
         rescanLibrary(false);
     }
 
+    private void addNetRoot(NetSource source) {
+        for (RootInfo root : roots) {
+            if (root.net != null && root.net.type.equals(source.type)
+                    && root.net.host.equals(source.host) && root.net.port == source.port
+                    && root.net.path.equals(source.path)) {
+                Toast.makeText(this, "该网络路径已在列表中", Toast.LENGTH_SHORT).show();
+                return;
+            }
+        }
+        if (TextUtils.isEmpty(source.id)) {
+            source.id = "n" + Long.toHexString(System.currentTimeMillis());
+        }
+        if (TextUtils.isEmpty(source.name)) {
+            source.name = source.host + (source.path.isEmpty() ? "" : "/" + source.path);
+        }
+        netSources.add(source);
+        roots.add(rootForNet(source));
+        saveRoots();
+        syncProxySources();
+        refreshRootRows();
+        refreshFilterBar();
+        rescanLibrary(false);
+    }
+
+    /** 添加 SMB / FTP 网络路径的输入对话框。 */
+    private void showNetSourceDialog() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        int pad = dp(20);
+        box.setPadding(pad, dp(6), pad, 0);
+
+        LinearLayout typeRow = new LinearLayout(this);
+        typeRow.setOrientation(LinearLayout.HORIZONTAL);
+        final String[] type = {"smb"};
+        Button smbToggle = typeToggle("SMB", true);
+        Button ftpToggle = typeToggle("FTP", false);
+        smbToggle.setOnClickListener(v -> {
+            type[0] = "smb";
+            smbToggle.setTextColor(colorAccent);
+            ftpToggle.setTextColor(colorTextSecondary);
+        });
+        ftpToggle.setOnClickListener(v -> {
+            type[0] = "ftp";
+            ftpToggle.setTextColor(colorAccent);
+            smbToggle.setTextColor(colorTextSecondary);
+        });
+        typeRow.addView(smbToggle, new LinearLayout.LayoutParams(0, dp(40), 1));
+        typeRow.addView(ftpToggle, new LinearLayout.LayoutParams(0, dp(40), 1));
+        box.addView(typeRow, new LinearLayout.LayoutParams(-1, -2));
+
+        EditText hostInput = inputField(box, "服务器地址（如 192.168.1.10）");
+        EditText portInput = inputField(box, "端口（SMB 默认 445，FTP 默认 21）");
+        EditText pathInput = inputField(box, "SMB: 共享名/子目录    FTP: 目录（可空）");
+        EditText userInput = inputField(box, "用户名（留空使用匿名/来宾访问）");
+        EditText passInput = inputField(box, "密码（可空）");
+        passInput.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+                | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        EditText nameInput = inputField(box, "显示名（可空，默认用地址）");
+
+        android.app.AlertDialog dialog = new android.app.AlertDialog.Builder(this)
+                .setTitle("添加网络路径")
+                .setView(box)
+                .setPositiveButton("添加", null)
+                .setNegativeButton("取消", null)
+                .create();
+        dialog.setOnShowListener(d -> dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            NetSource source = new NetSource();
+            source.type = type[0];
+            source.host = hostInput.getText().toString().trim();
+            source.path = pathInput.getText().toString().trim();
+            source.user = userInput.getText().toString().trim();
+            source.pass = passInput.getText().toString();
+            source.name = nameInput.getText().toString().trim();
+            if (source.host.isEmpty()) {
+                Toast.makeText(this, "请填写服务器地址", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            if ("smb".equals(source.type) && source.path.isEmpty()) {
+                Toast.makeText(this, "SMB 需要填写共享名，如 media/asmr", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            String portText = portInput.getText().toString().trim();
+            if (portText.isEmpty()) {
+                source.port = "ftp".equals(source.type) ? 21 : 445;
+            } else {
+                try {
+                    source.port = Integer.parseInt(portText);
+                } catch (NumberFormatException ex) {
+                    Toast.makeText(this, "端口格式不正确", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+            }
+            Toast.makeText(this, "正在测试连接...", Toast.LENGTH_SHORT).show();
+            dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setEnabled(false);
+            scanExecutor.execute(() -> {
+                String error = null;
+                try {
+                    NetClient.list(source, 1);
+                } catch (Exception ex) {
+                    error = ex.getMessage() == null ? ex.toString() : ex.getMessage();
+                }
+                final String finalError = error;
+                handler.post(() -> {
+                    dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setEnabled(true);
+                    if (finalError != null) {
+                        Toast.makeText(this, "连接失败: " + finalError, Toast.LENGTH_LONG).show();
+                        return;
+                    }
+                    dialog.dismiss();
+                    addNetRoot(source);
+                    Toast.makeText(this, "网络路径已添加，开始扫描", Toast.LENGTH_SHORT).show();
+                });
+            });
+        }));
+        dialog.show();
+    }
+
+    private Button typeToggle(String text, boolean active) {
+        Button button = drawerButton(text);
+        button.setTextColor(active ? colorAccent : colorTextSecondary);
+        button.setTextSize(14);
+        return button;
+    }
+
+    private EditText inputField(LinearLayout box, String hint) {
+        EditText input = new EditText(this);
+        input.setHint(hint);
+        input.setTextColor(colorTextPrimary);
+        input.setHintTextColor(colorTextSecondary);
+        input.setTextSize(14);
+        input.setSingleLine(true);
+        input.setBackground(cardDrawable());
+        input.setPadding(dp(12), dp(10), dp(12), dp(10));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+        params.topMargin = dp(10);
+        box.addView(input, params);
+        return input;
+    }
+
     private void removeRoot(int index) {
         if (index < 0 || index >= roots.size()) {
             return;
         }
         RootInfo root = roots.remove(index);
-        try {
-            getContentResolver().releasePersistableUriPermission(
-                    Uri.parse(root.uri), Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        } catch (Exception ignored) {
+        if (root.net == null) {
+            try {
+                getContentResolver().releasePersistableUriPermission(
+                        Uri.parse(root.uri), Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            } catch (Exception ignored) {
+            }
+        } else {
+            netSources.remove(root.net);
         }
         if (filterRootIndex >= roots.size()) {
             filterRootIndex = -1;
         }
         saveRoots();
+        syncProxySources();
         registerLibraryObserver();
         refreshRootRows();
         refreshFilterBar();
@@ -1520,6 +1680,7 @@ public class MainActivity extends Activity {
 
     private void loadRoots() {
         roots.clear();
+        netSources.clear();
         String raw = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_TREE_URIS, null);
         if (TextUtils.isEmpty(raw)) {
             String legacy = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_TREE_URI, null);
@@ -1530,31 +1691,76 @@ public class MainActivity extends Activity {
                 } catch (Exception ignored) {
                 }
             }
-            return;
+        } else {
+            try {
+                JSONArray array = new JSONArray(raw);
+                for (int i = 0; i < array.length(); i++) {
+                    String uriString = array.optString(i, "");
+                    if (TextUtils.isEmpty(uriString)) {
+                        continue;
+                    }
+                    try {
+                        roots.add(new RootInfo(uriString,
+                                displayNameFromTreeId(DocumentsContract.getTreeDocumentId(Uri.parse(uriString)))));
+                    } catch (Exception ignored) {
+                    }
+                }
+            } catch (JSONException ignored) {
+            }
         }
         try {
-            JSONArray array = new JSONArray(raw);
-            for (int i = 0; i < array.length(); i++) {
-                String uriString = array.optString(i, "");
-                if (TextUtils.isEmpty(uriString)) {
-                    continue;
-                }
-                try {
-                    roots.add(new RootInfo(uriString,
-                            displayNameFromTreeId(DocumentsContract.getTreeDocumentId(Uri.parse(uriString)))));
-                } catch (Exception ignored) {
+            String netRaw = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_NET_SOURCES, null);
+            if (!TextUtils.isEmpty(netRaw)) {
+                JSONArray array = new JSONArray(netRaw);
+                for (int i = 0; i < array.length(); i++) {
+                    JSONObject object = array.optJSONObject(i);
+                    if (object == null) {
+                        continue;
+                    }
+                    NetSource source = NetSource.fromJson(object);
+                    if (TextUtils.isEmpty(source.id)) {
+                        continue;
+                    }
+                    netSources.add(source);
+                    roots.add(rootForNet(source));
                 }
             }
         } catch (JSONException ignored) {
         }
     }
 
+    private RootInfo rootForNet(NetSource source) {
+        RootInfo root = new RootInfo("net://" + source.id, source.name);
+        root.net = source;
+        return root;
+    }
+
     private void saveRoots() {
         JSONArray array = new JSONArray();
         for (RootInfo root : roots) {
-            array.put(root.uri);
+            if (root.net == null) {
+                array.put(root.uri);
+            }
         }
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_TREE_URIS, array.toString()).apply();
+        JSONArray netArray = new JSONArray();
+        for (NetSource source : netSources) {
+            try {
+                netArray.put(source.toJson());
+            } catch (JSONException ignored) {
+            }
+        }
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putString(KEY_TREE_URIS, array.toString())
+                .putString(KEY_NET_SOURCES, netArray.toString())
+                .apply();
+    }
+
+    private void syncProxySources() {
+        Map<String, NetSource> map = new HashMap<>();
+        for (NetSource source : netSources) {
+            map.put(source.id, source);
+        }
+        StreamProxy.get().setSources(map);
     }
 
     private void refreshRootRows() {
@@ -1605,6 +1811,9 @@ public class MainActivity extends Activity {
             }
         };
         for (RootInfo root : roots) {
+            if (root.net != null) {
+                continue;
+            }
             try {
                 Uri treeUri = Uri.parse(root.uri);
                 String treeDocumentId = DocumentsContract.getTreeDocumentId(treeUri);
@@ -1733,9 +1942,14 @@ public class MainActivity extends Activity {
             Collator collator = Collator.getInstance(Locale.CHINA);
             for (RootInfo root : rootsSnapshot) {
                 try {
-                    Uri treeUri = Uri.parse(root.uri);
-                    String treeDocumentId = DocumentsContract.getTreeDocumentId(treeUri);
-                    List<FileDoc> files = listTreeFilesRecursive(treeUri, treeDocumentId);
+                    List<FileDoc> files;
+                    if (root.net != null) {
+                        files = netListFilesRecursive(root.net);
+                    } else {
+                        Uri treeUri = Uri.parse(root.uri);
+                        String treeDocumentId = DocumentsContract.getTreeDocumentId(treeUri);
+                        files = listTreeFilesRecursive(treeUri, treeDocumentId);
+                    }
                     List<WorkBuilder> builders = buildWorks(files, root.name, root.name + "::");
                     Collections.sort(builders, (left, right) -> collator.compare(left.name, right.name));
                     for (WorkBuilder builder : builders) {
@@ -2089,6 +2303,92 @@ public class MainActivity extends Activity {
         return files;
     }
 
+    private List<FileDoc> netListFilesRecursive(NetSource source) throws Exception {
+        List<NetClient.Entry> entries = NetClient.list(source, NetClient.MAX_SCAN_DEPTH);
+        List<FileDoc> files = new ArrayList<>();
+        for (NetClient.Entry entry : entries) {
+            if (entry.isDir) {
+                continue;
+            }
+            String relativePath = entry.dir.isEmpty() ? entry.name : entry.dir + "/" + entry.name;
+            files.add(new FileDoc(entry.name, mimeForName(entry.name),
+                    Uri.parse("net://" + source.id + "/" + relativePath), relativePath, entry.dir));
+        }
+        return files;
+    }
+
+    private static String mimeForName(String name) {
+        int dot = name.lastIndexOf('.');
+        if (dot <= 0) {
+            return "";
+        }
+        String ext = name.substring(dot + 1).toLowerCase(Locale.ROOT);
+        String mime = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext);
+        if (mime != null) {
+            return mime;
+        }
+        if (ext.equals("mp3")) {
+            return "audio/mpeg";
+        }
+        if (ext.equals("wav")) {
+            return "audio/wav";
+        }
+        if (ext.equals("vtt")) {
+            return "text/vtt";
+        }
+        if (ext.equals("lrc")) {
+            return "text/plain";
+        }
+        return "";
+    }
+
+    /** net:// 文件走本地代理；其余原样返回。 */
+    private Uri toPlayableUri(Uri uri) {
+        if (uri != null && "net".equals(uri.getScheme())) {
+            String url = StreamProxy.get().urlFor(uri.toString());
+            return Uri.parse(url);
+        }
+        return uri;
+    }
+
+    /** 统一的文件流打开入口：net:// 走 SMB/FTP，其余走 ContentResolver。 */
+    private InputStream openStreamFor(Uri uri) throws java.io.IOException {
+        if (uri != null && "net".equals(uri.getScheme())) {
+            NetSource source = resolveNetSource(uri);
+            if (source == null) {
+                throw new java.io.IOException("网络路径不存在");
+            }
+            String path = uri.getPath();
+            if (path == null) {
+                path = "";
+            }
+            while (path.startsWith("/")) {
+                path = path.substring(1);
+            }
+            try {
+                return NetClient.open(source, path);
+            } catch (java.io.IOException ex) {
+                throw ex;
+            } catch (Exception ex) {
+                throw new java.io.IOException(ex.getMessage() == null ? ex.toString() : ex.getMessage());
+            }
+        }
+        return getContentResolver().openInputStream(uri);
+    }
+
+    private NetSource resolveNetSource(Uri uri) {
+        if (uri == null) {
+            return null;
+        }
+        String id = uri.getAuthority();
+        for (NetSource source : netSources) {
+            if (source.id.equals(id)) {
+                return source;
+            }
+        }
+        return null;
+    }
+
     private void scanDocumentChildren(Uri treeUri, String rootId, String documentId, String relativeDir, int depth, List<FileDoc> files) {
         if (depth > MAX_SCAN_DEPTH) {
             return;
@@ -2210,6 +2510,66 @@ public class MainActivity extends Activity {
     private int listSwipeBackDownY;
     private boolean listSwipeBackActive;
     private boolean listSwipeBackAnimating;
+    private int lyricsSwipeDownX;
+    private int lyricsSwipeDownY;
+    private boolean lyricsSwipeActive;
+
+    /** 台词界面左右滑动返回正在播放界面的手势检测。 */
+    private boolean handleLyricsSwipeBack(MotionEvent event) {
+        if (listSwipeBackAnimating) {
+            return true;
+        }
+        int action = event.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) {
+            lyricsSwipeDownX = (int) event.getRawX();
+            lyricsSwipeDownY = (int) event.getRawY();
+            lyricsSwipeActive = false;
+            return false;
+        }
+        if (action == MotionEvent.ACTION_MOVE) {
+            float dx = event.getRawX() - lyricsSwipeDownX;
+            float dy = event.getRawY() - lyricsSwipeDownY;
+            if (!lyricsSwipeActive
+                    && Math.abs(dx) > dp(18) && Math.abs(dx) > Math.abs(dy) * 1.2f) {
+                lyricsSwipeActive = true;
+                // 给 ListView 发 CANCEL 清除按压/滚动状态，避免松手误触台词跳转
+                MotionEvent cancel = MotionEvent.obtain(event);
+                cancel.setAction(MotionEvent.ACTION_CANCEL);
+                lyricsList.onTouchEvent(cancel);
+                cancel.recycle();
+            }
+            return lyricsSwipeActive;
+        }
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+            boolean wasActive = lyricsSwipeActive;
+            float dx = event.getRawX() - lyricsSwipeDownX;
+            lyricsSwipeActive = false;
+            if (wasActive && action == MotionEvent.ACTION_UP && Math.abs(dx) > dp(70)) {
+                animateLyricsBackToPlayer(dx >= 0 ? 1 : -1);
+                return true;
+            }
+            return wasActive;
+        }
+        return false;
+    }
+
+    /** 台词界面 → 正在播放界面的滑动返回动画。 */
+    private void animateLyricsBackToPlayer(int dir) {
+        if (listSwipeBackAnimating || pageMode != PAGE_LYRICS || lyricsList == null) {
+            return;
+        }
+        listSwipeBackAnimating = true;
+        lyricsList.animate().cancel();
+        lyricsList.animate().translationX(dir * lyricsList.getWidth() * 0.35f).alpha(0f)
+                .setDuration(200)
+                .setInterpolator(new android.view.animation.AccelerateInterpolator())
+                .withEndAction(() -> {
+                    lyricsList.setTranslationX(0f);
+                    lyricsList.setAlpha(1f);
+                    showPlayer();
+                    listSwipeBackAnimating = false;
+                }).start();
+    }
 
     /** 音轨列表左右滑动返回作品列表的手势检测。 */
     private boolean handleTracksSwipeBack(MotionEvent event) {
@@ -2809,7 +3169,7 @@ public class MainActivity extends Activity {
         waveform.setWaveform(null);
         player = new MediaPlayer();
         try {
-            player.setDataSource(this, item.audio.uri);
+            player.setDataSource(this, toPlayableUri(item.audio.uri));
             player.setOnPreparedListener(mp -> {
                 int duration = mp.getDuration();
                 waveform.setDuration(duration);
@@ -2965,37 +3325,58 @@ public class MainActivity extends Activity {
 
     private void loadCues(FileDoc subtitleFile) {
         cues.clear();
+        currentCueIndex = -1;
+        lyricsAdapter.notifyDataSetChanged();
+        updateFloatingLyricText();
         if (subtitleFile == null) {
             return;
         }
         boolean isLrc = subtitleFile.name.toLowerCase(Locale.ROOT).endsWith(".lrc");
-        try (InputStream input = getContentResolver().openInputStream(subtitleFile.uri)) {
-            if (input == null) {
+        Uri subtitleUri = subtitleFile.uri;
+        // 网络字幕走原始 socket，禁止在主线程读取，放到后台执行
+        imageExecutor.execute(() -> {
+            String text;
+            try (InputStream input = openStreamFor(subtitleUri)) {
+                if (input == null) {
+                    return;
+                }
+                text = new String(readAll(input), StandardCharsets.UTF_8)
+                        .replace("\r\n", "\n")
+                        .replace("\r", "\n");
+            } catch (Exception ex) {
+                handler.post(() -> Toast.makeText(MainActivity.this,
+                        "字幕读取失败: " + ex.getMessage(), Toast.LENGTH_LONG).show());
                 return;
             }
-            String text = new String(readAll(input), StandardCharsets.UTF_8)
-                    .replace("\r\n", "\n")
-                    .replace("\r", "\n");
             if (text.startsWith("\uFEFF")) {
                 text = text.substring(1);
             }
+            List<Cue> parsed = new ArrayList<>();
             if (isLrc) {
-                parseLrcLines(text);
+                parseLrcLines(text, parsed);
             } else {
                 String[] blocks = text.split("\n\n+");
                 for (String block : blocks) {
-                    parseCueBlock(block.trim());
+                    parseCueBlock(block.trim(), parsed);
                 }
             }
-            cues.sort((left, right) -> Long.compare(left.startMs, right.startMs));
-            lyricsAdapter.notifyDataSetChanged();
-        } catch (Exception ex) {
-            Toast.makeText(this, "字幕读取失败: " + ex.getMessage(), Toast.LENGTH_LONG).show();
-        }
+            Collections.sort(parsed, (left, right) -> Long.compare(left.startMs, right.startMs));
+            handler.post(() -> {
+                // 快速切歌时仅当字幕仍属于当前曲目才应用
+                MediaItem current = currentPlaybackItem();
+                if (current == null || current.vtt == null || !subtitleUri.equals(current.vtt.uri)) {
+                    return;
+                }
+                cues.clear();
+                cues.addAll(parsed);
+                lyricsAdapter.notifyDataSetChanged();
+                updateFloatingLyricText();
+            });
+        });
     }
 
     /** 解析 LRC：一行可带多个 [mm:ss.xx] 时间标签。 */
-    private void parseLrcLines(String text) {
+    private void parseLrcLines(String text, List<Cue> out) {
         java.util.regex.Pattern tagPattern = java.util.regex.Pattern.compile("\\[(\\d{1,2}:\\d{1,2}(?:[.:]\\d{1,3})?)\\]");
         for (String rawLine : text.split("\n")) {
             String line = rawLine.trim();
@@ -3017,7 +3398,7 @@ public class MainActivity extends Activity {
                 continue;
             }
             for (long start : starts) {
-                cues.add(new Cue(start, start + 5000, content));
+                out.add(new Cue(start, start + 5000, content));
             }
         }
     }
@@ -3042,7 +3423,7 @@ public class MainActivity extends Activity {
         updateProgress();
     }
 
-    private void parseCueBlock(String block) {
+    private void parseCueBlock(String block, List<Cue> out) {
         if (block.isEmpty() || block.equals("WEBVTT") || block.startsWith("NOTE")) {
             return;
         }
@@ -3075,7 +3456,7 @@ public class MainActivity extends Activity {
         }
         String cueText = builder.toString().trim();
         if (!cueText.isEmpty()) {
-            cues.add(new Cue(start, end, cueText));
+            out.add(new Cue(start, end, cueText));
         }
     }
 
@@ -3760,7 +4141,7 @@ public class MainActivity extends Activity {
         MediaExtractor extractor = new MediaExtractor();
         MediaCodec codec = null;
         try {
-            extractor.setDataSource(this, uri, null);
+            extractor.setDataSource(this, toPlayableUri(uri), null);
             int trackIndex = -1;
             MediaFormat format = null;
             for (int i = 0; i < extractor.getTrackCount(); i++) {
@@ -4354,7 +4735,7 @@ public class MainActivity extends Activity {
         try {
             BitmapFactory.Options bounds = new BitmapFactory.Options();
             bounds.inJustDecodeBounds = true;
-            try (InputStream input = getContentResolver().openInputStream(uri)) {
+            try (InputStream input = openStreamFor(uri)) {
                 if (input == null) {
                     return null;
                 }
@@ -4368,7 +4749,7 @@ public class MainActivity extends Activity {
             BitmapFactory.Options options = new BitmapFactory.Options();
             options.inSampleSize = Math.max(1, sampleSize);
             options.inPreferredConfig = Bitmap.Config.RGB_565;
-            try (InputStream input = getContentResolver().openInputStream(uri)) {
+            try (InputStream input = openStreamFor(uri)) {
                 if (input == null) {
                     return null;
                 }
@@ -4383,7 +4764,7 @@ public class MainActivity extends Activity {
         try {
             BitmapFactory.Options bounds = new BitmapFactory.Options();
             bounds.inJustDecodeBounds = true;
-            try (InputStream input = getContentResolver().openInputStream(uri)) {
+            try (InputStream input = openStreamFor(uri)) {
                 if (input == null) {
                     return null;
                 }
@@ -4398,7 +4779,7 @@ public class MainActivity extends Activity {
             }
             BitmapFactory.Options options = new BitmapFactory.Options();
             options.inSampleSize = sampleSize;
-            try (InputStream input = getContentResolver().openInputStream(uri)) {
+            try (InputStream input = openStreamFor(uri)) {
                 if (input == null) {
                     return null;
                 }
@@ -4828,6 +5209,7 @@ public class MainActivity extends Activity {
     private static class RootInfo {
         final String uri;
         final String name;
+        NetSource net;
 
         RootInfo(String uri, String name) {
             this.uri = uri;

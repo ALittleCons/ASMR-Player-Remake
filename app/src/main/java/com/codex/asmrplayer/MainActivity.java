@@ -2245,7 +2245,11 @@ public class MainActivity extends Activity {
         // 只快照列表本身：标题、筛选 chips、迷你播放条、底部导航保持真实 UI
         // 静止显示，避免固定控件被快照捕获后随覆盖层滑动产生重影错乱
         View snapshotSource = browserList;
-        int[] posTracks = rectOnRoot(snapshotSource, new int[2]);
+        // rectOnRoot 返回相对 rootLayout 的坐标，必须传 rootLayout 的屏幕位置，
+        // 传 [0,0] 会得到屏幕绝对坐标，使覆盖层偏低一个窗口顶部偏移量
+        int[] rootLoc = new int[2];
+        rootLayout.getLocationOnScreen(rootLoc);
+        int[] posTracks = rectOnRoot(snapshotSource, rootLoc);
         int listW = snapshotSource.getWidth();
         int tracksH = snapshotSource.getHeight();
         Bitmap tracksShot = snapshotView(snapshotSource);
@@ -2269,7 +2273,9 @@ public class MainActivity extends Activity {
         browserList.setAlpha(1f);
 
         browserList.post(() -> {
-            int[] posWorks = rectOnRoot(snapshotSource, new int[2]);
+            int[] rootLocNow = new int[2];
+            rootLayout.getLocationOnScreen(rootLocNow);
+            int[] posWorks = rectOnRoot(snapshotSource, rootLocNow);
             int worksH = snapshotSource.getHeight();
             Bitmap worksShot = snapshotView(snapshotSource);
             ImageView worksOverlay = new ImageView(this);

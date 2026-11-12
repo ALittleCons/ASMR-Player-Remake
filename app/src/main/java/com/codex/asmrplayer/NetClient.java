@@ -188,7 +188,21 @@ final class NetClient {
     }
 
     static String netUri(NetSource src, String relPath) {
-        return "net://" + src.id + "/" + encodeRelPath(relPath);
+        String id = src == null || src.id == null ? "" : src.id;
+        return "net://" + id + "/" + encodeRelPath(relPath);
+    }
+
+    /**
+     * 单飞建连用的键。id 在「添加网络路径」时尚未生成（要等真正入库才分配），
+     * 这里必须容忍 null——Collections.newSetFromMap(ConcurrentHashMap) 对 null 键
+     * 会抛 NPE，曾导致连接测试必定失败。
+     */
+    private static String warmKey(NetSource src) {
+        if (src.id != null && !src.id.isEmpty()) {
+            return src.id;
+        }
+        return (src.type == null ? "smb" : src.type) + "|" + src.host + "|" + src.port
+                + "|" + src.path + "|" + src.user;
     }
 
     // ---------------- net:// 路径编解码 ----------------
@@ -426,17 +440,21 @@ final class NetClient {
      * FTP 每次开流都是独立控制连接，没有可复用的对象，直接标记即可。
      */
     private static void ensureWarm(NetSource src) {
-        if (src == null || WARMED.contains(src.id)) {
+        if (src == null) {
             return;
         }
-        Object lock = WARM_LOCKS.get(src.id);
+        final String key = warmKey(src);
+        if (WARMED.contains(key)) {
+            return;
+        }
+        Object lock = WARM_LOCKS.get(key);
         if (lock == null) {
             Object created = new Object();
-            Object existing = WARM_LOCKS.putIfAbsent(src.id, created);
+            Object existing = WARM_LOCKS.putIfAbsent(key, created);
             lock = existing != null ? existing : created;
         }
         synchronized (lock) {
-            if (WARMED.contains(src.id)) {
+            if (WARMED.contains(key)) {
                 return;
             }
             if (!"ftp".equals(src.type)) {
@@ -446,7 +464,7 @@ final class NetClient {
                 }
             }
             // 失败也标记：离线时不该每次开文件都重新等一次超时
-            WARMED.add(src.id);
+            WARMED.add(key);
         }
     }
 

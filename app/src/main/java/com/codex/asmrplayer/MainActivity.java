@@ -1581,6 +1581,25 @@ public class MainActivity extends Activity {
         rescanLibrary(false);
     }
 
+    /** 异常链里最有信息量的一层，用于把「连接失败」的具体原因直接显示给用户。 */
+    private static String describeError(Throwable ex) {
+        if (ex == null) {
+            return "未知错误";
+        }
+        Throwable root = ex;
+        while (root.getCause() != null && root.getCause() != root) {
+            root = root.getCause();
+        }
+        String message = root.getMessage();
+        if (TextUtils.isEmpty(message)) {
+            message = root.getClass().getSimpleName();
+        }
+        if (root != ex) {
+            return message + "（" + ex.getClass().getSimpleName() + "）";
+        }
+        return message;
+    }
+
     /** 添加 SMB / FTP 网络路径的输入对话框。 */
     private void showNetSourceDialog() {
         LinearLayout box = new LinearLayout(this);
@@ -1624,6 +1643,9 @@ public class MainActivity extends Activity {
                 .create();
         dialog.setOnShowListener(d -> dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
             NetSource source = new NetSource();
+            // id 必须在测试连接前生成：NetClient 用它做会话缓存与 net:// 的 authority，
+            // 留空会在 WARMED 的 ConcurrentHashMap 里触发 NPE，表现就是「连接失败」
+            source.id = "n" + Long.toHexString(System.currentTimeMillis());
             source.type = type[0];
             source.host = hostInput.getText().toString().trim();
             source.path = pathInput.getText().toString().trim();
@@ -1656,7 +1678,8 @@ public class MainActivity extends Activity {
                 try {
                     NetClient.list(source, 1);
                 } catch (Exception ex) {
-                    error = ex.getMessage() == null ? ex.toString() : ex.getMessage();
+                    Log.w(TAG, "connect test failed", ex);
+                    error = describeError(ex);
                 }
                 final String finalError = error;
                 handler.post(() -> {
@@ -1774,17 +1797,27 @@ public class MainActivity extends Activity {
             String netRaw = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_NET_SOURCES, null);
             if (!TextUtils.isEmpty(netRaw)) {
                 JSONArray array = new JSONArray(netRaw);
+                boolean repaired = false;
                 for (int i = 0; i < array.length(); i++) {
                     JSONObject object = array.optJSONObject(i);
                     if (object == null) {
                         continue;
                     }
                     NetSource source = NetSource.fromJson(object);
-                    if (TextUtils.isEmpty(source.id)) {
+                    if (TextUtils.isEmpty(source.host)) {
                         continue;
+                    }
+                    // 老版本可能存下空 id：直接丢弃会让配置「凭空消失」，
+                    // 这里补一个并回写，保证 net:// 的 authority 始终存在
+                    if (TextUtils.isEmpty(source.id)) {
+                        source.id = "n" + Long.toHexString(System.currentTimeMillis() + i);
+                        repaired = true;
                     }
                     netSources.add(source);
                     roots.add(rootForNet(source));
+                }
+                if (repaired) {
+                    saveRoots();
                 }
             }
         } catch (JSONException ignored) {
@@ -2033,8 +2066,10 @@ public class MainActivity extends Activity {
                         }
                     }
                 } catch (Exception ex) {
+                    Log.w(TAG, "scan failed: " + root.name, ex);
+                    final String reason = describeError(ex);
                     handler.post(() -> Toast.makeText(MainActivity.this,
-                            "扫描 " + root.name + " 失败: " + ex.getMessage(), Toast.LENGTH_LONG).show());
+                            "扫描 " + root.name + " 失败: " + reason, Toast.LENGTH_LONG).show());
                 }
             }
             List<WorkItem> merged = mergeWorks(scanned, cachedOrder);

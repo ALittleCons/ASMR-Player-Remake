@@ -2,6 +2,30 @@
 
 本文件记录本二次开发分支相对原项目（[Baimo1209/ASMR-Player](https://github.com/Baimo1209/ASMR-Player) v1.4.0）的演进。
 
+## v1.5.7（versionCode 12）
+
+修一个从 v1.5.5 起就存在、只在「添加网络路径」时触发的崩溃式失败。
+
+- **添加 SMB / FTP 路径必定提示「连接失败」**。对话框里新建的 `NetSource` 还没有
+  `id`（`id` 要等入库时才分配），而连接测试走的是 `NetClient.list()`，其开头的
+  `ensureWarm()` 用 `id` 作会话缓存键。`WARMED` 是
+  `Collections.newSetFromMap(new ConcurrentHashMap<>())`，对这个 map 查 `null` 键
+  会直接抛 NPE（`ConcurrentHashMap.get` → `hashCode() on a null object reference`），
+  于是任何一次添加都停在「连接失败: java.lang.NullPointerException」，路径根本进不了列表。
+  现在三层都做了处理：对话框在测试前就生成 `id`；`ensureWarm` 用
+  `type|host|port|path|user` 兜底 `id` 为空的情况；读取旧配置时若 `id` 为空则补齐并回写
+  （旧版会直接丢弃该条，表现为「配置凭空消失」）。
+- **失败原因不再只有一句 NPE**。连接测试与扫描失败的提示改为取异常链最内层的消息，
+  并写入 logcat（`AsmrPlayer` 标签），方便直接把真实原因发回来定位。
+
+复现与验证（模拟器 + 局域网 SMB）：
+
+| 步骤 | v1.5.6 | v1.5.7 |
+|---|---|---|
+| 设置 → 添加网络路径 → 填写后点「添加」 | 对话框不关，`NullPointerException`（`NetClient.ensureWarm:447`） | 对话框关闭，提示已添加，开始扫描 |
+| 列表作品数 | 87（新路径没进去） | 89（新路径扫描完成） |
+| 移除测试路径后 | — | 回到 87，无残留 |
+
 ## v1.5.6（versionCode 11）
 
 两个修复：网络路径里带 `%` 的作品打不开；点开某首音轨时显示的插画张冠李戴。

@@ -114,7 +114,7 @@ public class MainActivity extends Activity {
     private static final String KEY_WEB_HISTORY = "web_history";
     private static final String KEY_RECENT_AUDIO = "recent_audio";
     private static final String KEY_DARK_THEME = "dark_theme";
-    private static final String GITHUB_URL = "https://github.com/Baimo1209/ASMR-Player";
+    private static final String GITHUB_URL = "https://github.com/ALittleCons/ASMR-Player-Remake";
     private static final String TAG = "AsmrPlayer";
 
     private final Handler handler = new Handler(Looper.getMainLooper());

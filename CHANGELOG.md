@@ -26,6 +26,11 @@
 | 列表作品数 | 87（新路径没进去） | 89（新路径扫描完成） |
 | 移除测试路径后 | — | 回到 87，无残留 |
 
+- **「关于」页的 GitHub 按钮改为指向本仓库**。此前沿用原项目的
+  `https://github.com/Baimo1209/ASMR-Player`，装本分支包的人点进去看到的是原版，
+  找不到 Remake 的更新说明。现在指向
+  [`ALittleCons/ASMR-Player-Remake`](https://github.com/ALittleCons/ASMR-Player-Remake)。
+
 ## v1.5.6（versionCode 11）
 
 两个修复：网络路径里带 `%` 的作品打不开；点开某首音轨时显示的插画张冠李戴。

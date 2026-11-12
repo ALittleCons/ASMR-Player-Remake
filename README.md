@@ -28,7 +28,7 @@
 
 ## 安装
 
-- 版本：**v1.5.5**（versionCode 10）
+- 版本：**v1.5.6**（versionCode 11）
 - 包名：`com.codex.asmrplayer`
 - 系统要求：Android 6.0（API 23）及以上，targetSdk 35
 - 下载：本仓库 **Releases** 页的 `*-release.apk`

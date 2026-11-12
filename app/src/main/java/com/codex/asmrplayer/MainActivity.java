@@ -2306,7 +2306,7 @@ public class MainActivity extends Activity {
             }
             String relativePath = entry.dir.isEmpty() ? entry.name : entry.dir + "/" + entry.name;
             files.add(new FileDoc(entry.name, mimeForName(entry.name),
-                    Uri.parse("net://" + source.id + "/" + relativePath), relativePath, entry.dir));
+                    Uri.parse(NetClient.netUri(source, relativePath)), relativePath, entry.dir));
         }
         return files;
     }
@@ -2352,13 +2352,9 @@ public class MainActivity extends Activity {
             if (source == null) {
                 throw new java.io.IOException("网络路径不存在");
             }
-            String path = uri.getPath();
-            if (path == null) {
-                path = "";
-            }
-            while (path.startsWith("/")) {
-                path = path.substring(1);
-            }
+            // 不能用 uri.getPath()：路径里出现「100%毒舌」这类裸 % 时，getPath()
+            // 会把 % 当成转义序列解成 NUL，SMB 直接报「文件名语法不正确」。
+            String path = NetClient.relPathOf(uri);
             try {
                 return NetClient.open(source, path);
             } catch (java.io.IOException ex) {
@@ -3135,13 +3131,6 @@ public class MainActivity extends Activity {
         if (index < 0 || index >= playbackQueue.size()) {
             return;
         }
-        // 捕获切换前正在显示的图片，切歌后若无同名图则保持显示它
-        MediaItem prevTrack = currentPlaybackItem();
-        FileDoc prevShownImage = null;
-        if (prevTrack != null && !prevTrack.images.isEmpty()
-                && currentImageIndex >= 0 && currentImageIndex < prevTrack.images.size()) {
-            prevShownImage = prevTrack.images.get(currentImageIndex);
-        }
         currentIndex = index;
         if (openPlayerPage) {
             showPlayer();
@@ -3153,7 +3142,7 @@ public class MainActivity extends Activity {
         folderView.setText(playbackWork == null ? item.audio.parentPath : playbackWork.name);
         lyricView.setText(item.vtt == null ? "未找到字幕文件" : "字幕已载入");
         updateFloatingLyricText();
-        currentImageIndex = resolveImageIndexForCurrentAudio(prevShownImage);
+        currentImageIndex = resolveImageIndexForCurrentAudio();
         coverView.setTranslationX(0f);
         coverView.setAlpha(1f);
         imageSwitching = false;
@@ -3635,28 +3624,46 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 打开播放页或切歌时决定显示的图片索引：优先与音频同名的图片，否则保持当前浏览的图片。 */
-    private int resolveImageIndexForCurrentAudio(FileDoc prevShown) {
+    /**
+     * 打开播放页或切歌时决定显示的图片索引：只认「与音频同名的插画」。
+     * <p>
+     * 无同名插画时一律回到封面（索引 0）。旧实现会「保持上一张」，
+     * 于是没有专属插画的音轨会沿用上一个角色的图——表现就是点开 01 却看到
+     * 03 甚至 02 的图。
+     */
+    private int resolveImageIndexForCurrentAudio() {
         MediaItem item = currentPlaybackItem();
         if (item == null || item.images.isEmpty()) {
             return 0;
         }
-        String audioStem = stemStatic(item.audio.name);
+        String audioStem = matchStem(item.audio.name);
         if (!TextUtils.isEmpty(audioStem)) {
             for (int i = 0; i < item.images.size(); i++) {
-                if (stemStatic(item.images.get(i).name).equalsIgnoreCase(audioStem)) {
+                if (matchStem(item.images.get(i).name).equals(audioStem)) {
                     return i;
                 }
             }
         }
-        if (prevShown != null) {
-            for (int i = 0; i < item.images.size(); i++) {
-                if (item.images.get(i).uri.equals(prevShown.uri)) {
-                    return i;
-                }
+        return 0;
+    }
+
+    /**
+     * 用于「音频 ↔ 同名插画」匹配的基名：去掉图片扩展名后，再剥掉可能残留的
+     * 音频扩展名。不少作品把插画存成 {@code 03.xxx.mp3.png}，而音频是
+     * {@code 03.xxx.mp3}——只去一层扩展名会得到 {@code 03.xxx.mp3} 与
+     * {@code 03.xxx}，永远匹配不上。
+     */
+    private static String matchStem(String name) {
+        String stem = stemStatic(name);
+        while (true) {
+            if (stem.endsWith(".mp3") || stem.endsWith(".wav") || stem.endsWith(".m4a")
+                    || stem.endsWith(".flac") || stem.endsWith(".ogg") || stem.endsWith(".aac")
+                    || stem.endsWith(".opus") || stem.endsWith(".wma")) {
+                stem = stem.substring(0, stem.lastIndexOf('.'));
+            } else {
+                return stem;
             }
         }
-        return Math.max(0, Math.min(currentImageIndex, item.images.size() - 1));
     }
 
     private int[] rectOnRoot(View view, int[] rootLoc) {
@@ -5187,7 +5194,6 @@ public class MainActivity extends Activity {
         final List<FileDoc> images = new ArrayList<>();
         final Map<String, FileDoc> vttByName = new HashMap<>();
         final Map<String, FileDoc> lrcByName = new HashMap<>();
-        final Map<String, FileDoc> imageByStem = new HashMap<>();
 
         WorkBuilder(String key, String name) {
             this.key = TextUtils.isEmpty(key) ? name : key;
@@ -5206,7 +5212,6 @@ public class MainActivity extends Activity {
                 audio.add(file);
             } else if (isImageStatic(lower)) {
                 images.add(file);
-                imageByStem.put(stemStatic(file.name), file);
             }
         }
 
@@ -5234,36 +5239,19 @@ public class MainActivity extends Activity {
             FileDoc cover = images.isEmpty() ? null : images.get(0);
             List<MediaItem> tracks = new ArrayList<>();
             for (FileDoc file : audio) {
-                List<FileDoc> trackImages = collectImagesFor(file, cover);
+                List<FileDoc> trackImages = collectImagesFor();
                 FileDoc vtt = findVtt(file);
                 tracks.add(new MediaItem(file, trackImages, vtt));
             }
             return new WorkItem(key, name, cover, tracks);
         }
 
-        private List<FileDoc> collectImagesFor(FileDoc audioFile, FileDoc cover) {
-            List<FileDoc> result = new ArrayList<>();
-            addUnique(result, cover);
-            FileDoc sameName = imageByStem.get(stemStatic(audioFile.name));
-            addUnique(result, sameName);
-            // 其余图片一律按统一固定顺序追加；旧版「同目录优先」会让同一作品内
-            // 不同音轨看到的图片顺序不一致
-            for (FileDoc image : images) {
-                addUnique(result, image);
-            }
-            return result;
-        }
-
-        private void addUnique(List<FileDoc> result, FileDoc image) {
-            if (image == null) {
-                return;
-            }
-            for (FileDoc existing : result) {
-                if (existing.uri.equals(image.uri)) {
-                    return;
-                }
-            }
-            result.add(image);
+        private List<FileDoc> collectImagesFor() {
+            // 所有音轨共用同一份图片顺序（封面在首位，其余按固定全序）。
+            // 旧实现会把「同名插画」提到第二位，导致每个音轨的图片列表顺序不同：
+            // 切歌后同一个索引指向的是另一张图，滑动位置也会莫名跳变。
+            // 专属插画现在由 resolveImageIndexForCurrentAudio 按文件名定位，无需重排。
+            return new ArrayList<>(images);
         }
 
         private FileDoc findVtt(FileDoc audioFile) {

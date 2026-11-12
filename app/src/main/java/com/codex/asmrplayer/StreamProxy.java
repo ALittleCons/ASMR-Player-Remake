@@ -70,14 +70,9 @@ final class StreamProxy {
     String urlFor(String netUri) {
         Uri uri = Uri.parse(netUri);
         String id = uri.getAuthority();
-        String path = uri.getPath();
-        if (path == null) {
-            path = "";
-        }
-        while (path.startsWith("/")) {
-            path = path.substring(1);
-        }
-        return "http://127.0.0.1:" + port + "/s/" + id + "/" + Uri.encode(path, "/");
+        // 统一走 NetClient 的编解码：getPath() 遇到含 % 的路径会解码出 NUL
+        String path = NetClient.relPathOf(uri);
+        return "http://127.0.0.1:" + port + "/s/" + id + "/" + NetClient.encodeRelPath(path);
     }
 
     private void acceptLoop() {
@@ -135,7 +130,8 @@ final class StreamProxy {
                 return;
             }
             String sourceId = rest.substring(0, slash);
-            String relPath = Uri.decode(rest.substring(slash + 1));
+            // 与 urlFor 对称解码：兼容旧地址里的裸 % 和新地址的全量百分号编码
+            String relPath = NetClient.decodeRelPath(rest.substring(slash + 1));
             while (relPath.startsWith("/")) {
                 relPath = relPath.substring(1);
             }

@@ -1,5 +1,7 @@
 package com.codex.asmrplayer;
 
+import android.net.Uri;
+
 import org.apache.commons.net.ftp.FTP;
 import org.apache.commons.net.ftp.FTPClient;
 import org.apache.commons.net.ftp.FTPFile;
@@ -185,8 +187,108 @@ final class NetClient {
         }
     }
 
-    private static String netUri(NetSource src, String relPath) {
-        return "net://" + src.id + "/" + relPath;
+    static String netUri(NetSource src, String relPath) {
+        return "net://" + src.id + "/" + encodeRelPath(relPath);
+    }
+
+    // ---------------- net:// 路径编解码 ----------------
+
+    private static final char[] HEX = "0123456789ABCDEF".toCharArray();
+
+    /**
+     * 把相对路径编成可安全放进 URI / HTTP 请求行的形式（UTF-8 百分号编码）。
+     * <p>
+     * 必须编码：路径里可能出现 {@code %}、{@code #}、{@code ?}、空格。
+     * 其中裸 {@code %} 最致命——{@code Uri.getPath()} 会把「100%毒舌」里的
+     * 「%毒」当成转义序列解成一个 NUL 字符，路径直接损坏，SMB 返回
+     * 「filename syntax is incorrect」。实测整个作品都读不出来就是这个原因。
+     * <p>
+     * 保留 {@code /} 作为层级分隔；其余非 unreserved 字符一律编码，中文也编码，
+     * 这样 HTTP 代理地址里不含裸非 ASCII，MediaPlayer 不会再做二次处理。
+     */
+    static String encodeRelPath(String relPath) {
+        if (relPath == null || relPath.isEmpty()) {
+            return "";
+        }
+        byte[] bytes;
+        try {
+            bytes = relPath.getBytes("UTF-8");
+        } catch (Exception ex) {
+            bytes = relPath.getBytes();
+        }
+        StringBuilder builder = new StringBuilder(bytes.length * 3);
+        for (byte value : bytes) {
+            int b = value & 0xFF;
+            if ((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+                    || b == '-' || b == '_' || b == '.' || b == '~' || b == '/') {
+                builder.append((char) b);
+            } else {
+                builder.append('%').append(HEX[b >> 4]).append(HEX[b & 0x0F]);
+            }
+        }
+        return builder.toString();
+    }
+
+    /**
+     * URI（net:// 或本地代理的 /s/ 路径）→ 原始相对路径。
+     * <p>
+     * 用 {@code getEncodedPath()} 再自行解码，而不是 {@code getPath()}：
+     * 后者遇到非法转义（旧缓存里未编码的裸 %）会解码出 NUL 字节，把路径毁掉。
+     * 这里只解「% + 两位十六进制」，其余字符原样保留，新旧缓存都能正确还原。
+     * 连续转义按 UTF-8 字节还原，中文路径（%E4%BA%B2…）也不会变成乱码。
+     */
+    static String decodeRelPath(String encoded) {
+        if (encoded == null || encoded.isEmpty()) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder(encoded.length());
+        java.io.ByteArrayOutputStream pending = new java.io.ByteArrayOutputStream(4);
+        int i = 0;
+        while (i < encoded.length()) {
+            char c = encoded.charAt(i);
+            if (c == '%' && i + 2 < encoded.length()) {
+                int high = Character.digit(encoded.charAt(i + 1), 16);
+                int low = Character.digit(encoded.charAt(i + 2), 16);
+                if (high >= 0 && low >= 0) {
+                    pending.write((high << 4) + low);
+                    i += 3;
+                    continue;
+                }
+            }
+            flushUtf8(pending, out);
+            out.append(c);
+            i++;
+        }
+        flushUtf8(pending, out);
+        return out.toString();
+    }
+
+    /** 从 net:// URI 取原始相对路径（去掉开头的一个 /）。 */
+    static String relPathOf(Uri uri) {
+        if (uri == null) {
+            return "";
+        }
+        String encoded = uri.getEncodedPath();
+        if (encoded == null) {
+            encoded = uri.getPath();
+        }
+        String path = decodeRelPath(encoded);
+        while (path.startsWith("/")) {
+            path = path.substring(1);
+        }
+        return path;
+    }
+
+    private static void flushUtf8(java.io.ByteArrayOutputStream pending, StringBuilder out) {
+        if (pending.size() == 0) {
+            return;
+        }
+        try {
+            out.append(pending.toString("UTF-8"));
+        } catch (Exception ex) {
+            out.append(pending.toString());
+        }
+        pending.reset();
     }
 
     // ---------------- FTP ----------------

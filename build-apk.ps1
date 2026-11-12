@@ -8,8 +8,16 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $sdk = Join-Path $root ".android-sdk"
 $gradle = Join-Path $root ".gradle-local\gradle-8.10.2\bin\gradle.bat"
 
-$env:ANDROID_HOME = $sdk
-$env:ANDROID_SDK_ROOT = $sdk
+# 仓库自带的便携环境优先；否则回退到 Gradle Wrapper（首次运行会下载 Gradle 8.10.2）
+if (-not (Test-Path $gradle)) {
+    $gradle = Join-Path $root "gradlew.bat"
+}
+
+# .android-sdk 不存在时不覆盖 ANDROID_HOME，改用系统环境变量或 local.properties
+if (Test-Path $sdk) {
+    $env:ANDROID_HOME = $sdk
+    $env:ANDROID_SDK_ROOT = $sdk
+}
 
 if ($Release) {
     & $gradle clean assembleRelease lintRelease

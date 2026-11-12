@@ -55,22 +55,33 @@ FTP：ftp://192.168.1.10:21/子目录
 
 ## 构建
 
-需要 JDK 17 与 Android SDK（compileSdk 35）。
+需要 **JDK 17**、Android SDK（compileSdk 35）。首次构建前请让 Gradle 找到 SDK：
 
-```powershell
-# 调试包
-.\build-apk.ps1
-
-# 正式签名包（需要根目录 keystore.properties + keystore 文件，两者均不入库）
-.\build-apk.ps1 -Release
+```properties
+# local.properties（不要提交）
+sdk.dir=C:\\Users\\you\\AppData\\Local\\Android\\Sdk
 ```
 
-或直接使用 Gradle：
+或设置环境变量 `ANDROID_HOME`。
 
 ```bash
+# 调试包
 ./gradlew assembleDebug
+
+# 正式签名包（需要根目录 keystore.properties + keystore 文件，两者均不入库）
 ./gradlew assembleRelease
 ```
+
+Windows 下也可用项目自带的脚本，它优先使用仓库内的便携环境（`.gradle-local/`、`.android-sdk/`，均已被忽略），找不到时回退到 Wrapper：
+
+```powershell
+.\build-apk.ps1            # debug
+.\build-apk.ps1 -Release   # release
+```
+
+> 首次运行 `gradlew` 会从 `services.gradle.org` 下载 Gradle 8.10.2（约 130MB）。国内网络较慢时可把
+> `gradle/wrapper/gradle-wrapper.properties` 里的 `distributionUrl` 换成
+> `https\://mirrors.cloud.tencent.com/gradle/gradle-8.10.2-bin.zip` 之类的镜像。
 
 `keystore.properties` 格式：
 

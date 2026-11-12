@@ -1,0 +1,18 @@
+# 统一换行，避免 Windows 上提交后 gradlew 带 CRLF
+* text=auto
+
+*.java text
+*.gradle text
+*.xml text
+*.md text
+*.properties text
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+
+gradlew text eol=lf
+*.sh text eol=lf
+
+*.jar binary
+*.jks binary
+*.png binary
+*.ico binary

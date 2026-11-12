@@ -16,3 +16,18 @@ RJ*/
 *.vtt
 hs_err_pid*.log
 replay_pid*.log
+
+# 本地素材与录制（切勿入库：可能含音声/封面等版权内容）
+*.flac
+*.m4a
+*.lrc
+*.mp4
+*.pcap
+*.aab
+
+# 本地临时文件
+*.log
+README.upstream.md.bak
+captures/
+release/
+

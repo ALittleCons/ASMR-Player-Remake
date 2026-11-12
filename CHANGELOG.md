@@ -2,6 +2,23 @@
 
 本文件记录本二次开发分支相对原项目（[Baimo1209/ASMR-Player](https://github.com/Baimo1209/ASMR-Player) v1.4.0）的演进。
 
+## v1.5.5（versionCode 10）
+
+网络路径图片加载提速。此前每张封面实际只有约 3MB/s，瓶颈不在网络。
+
+- **SMB 读取块大小**：jcifs 每个 SMB2 READ 的请求体取自 `jcifs.smb.client.rcv_buf_size`
+  （默认 64KB），又被调用方的读缓冲截断。原实现用 16KB 缓冲逐块读，等于每 16KB
+  等一次往返。现在 socket 收发缓冲与 `maxRequestSize` 提到 1MB，网络路径读缓冲提到
+  256KB。实测同一批封面（32.1MB）耗时 14.25s → 4.2s，吞吐 2.25MB/s → 7.6MB/s；
+  滚动时稳定在 13.6MB/s 以上（同一台 NAS 用系统 SMB 客户端读取约 36MB/s）。
+- **会话单飞**：jcifs 的传输层是懒建立的，首屏多个并发请求会各自建连，每条都要付
+  协商 + 认证 + tree connect。现在首个请求先建连，其余复用，首屏前几张不再各等 1 秒。
+- **列表缩略图线程 2 → 3**，并关闭 DFS 探测与空闲断连。
+- **FTP 数据通道**缓冲由 commons-net 默认的 1KB 提到 64KB。
+- 缩略图落盘缓存命中后，二次启动列表零网络请求（实测 2 秒内 7 行全部显示）。
+- 新增可选 IO 日志（`adb shell setprop log.tag.AsmrIO DEBUG`），输出每张图的
+  字节数、耗时与吞吐，便于在真实设备上定位。
+
 ## v1.5.4（versionCode 9）
 
 修复播放页图片滑动「反向反弹」与转场断裂。

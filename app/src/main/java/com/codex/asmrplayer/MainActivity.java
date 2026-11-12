@@ -125,7 +125,7 @@ public class MainActivity extends Activity {
     private final List<String> webHistory = new ArrayList<>();
     private final List<RecentTrack> recentTracks = new ArrayList<>();
     /** 列表缩略图；与播放页大图、波形/字幕分流，避免大库下互相饿死。 */
-    private final ExecutorService imageExecutor = Executors.newFixedThreadPool(2);
+    private final ExecutorService imageExecutor = Executors.newFixedThreadPool(3);
     /** 播放页大图 / 相邻预览 / 全屏看图，专用高优先级线程池。 */
     private final ExecutorService bigImageExecutor = Executors.newFixedThreadPool(2);
     /** 波形计算、字幕解析等辅助 IO。 */
@@ -329,6 +329,7 @@ public class MainActivity extends Activity {
             lyricView.setText("请点击“重新扫描”刷新作品列表，之后会使用缓存快速进入");
             sectionSubtitleView.setText("未找到预加载缓存");
         }
+        warmUpNetSources();
     }
 
     @Override
@@ -1719,6 +1720,24 @@ public class MainActivity extends Activity {
         refreshFilterBar();
         rescanLibrary(false);
         Toast.makeText(this, "已移除 " + root.name, Toast.LENGTH_SHORT).show();
+    }
+
+    /**
+     * 提前建立 SMB/FTP 会话。
+     * 首次访问共享要付一次协商 + 认证 + tree connect 的开销（实测 1s 以上），
+     * 首屏三张封面并排触发时每张都要等，表现为"前几张特别慢、后面很快"。
+     * 这里在启动时用后台线程先摸一次共享根目录，把成本挪到用户看列表之前。
+     */
+    private void warmUpNetSources() {
+        if (netSources.isEmpty()) {
+            return;
+        }
+        final List<NetSource> snapshot = new ArrayList<>(netSources);
+        auxExecutor.execute(() -> {
+            for (NetSource source : snapshot) {
+                NetClient.warmUp(source);
+            }
+        });
     }
 
     private void loadRoots() {
@@ -4816,12 +4835,18 @@ public class MainActivity extends Activity {
      * 在 NAS 上会明显卡顿甚至超时。这里只建立一个连接。
      */
     private byte[] readImageBytes(Uri uri) {
+        boolean remote = uri != null && "net".equals(uri.getScheme());
+        // 网络路径按 256KB 读：jcifs 的 SMB2 READ 请求大小会被调用方缓冲截断，
+        // 16KB 的旧缓冲等于每 16KB 等一次往返，实测只有 3MB/s 左右
+        int bufferSize = remote ? 256 * 1024 : 32 * 1024;
+        long started = remote && Log.isLoggable("AsmrIO", Log.DEBUG)
+                ? android.os.SystemClock.elapsedRealtime() : 0L;
         try (InputStream input = openStreamFor(uri)) {
             if (input == null) {
                 return null;
             }
-            ByteArrayOutputStream out = new ByteArrayOutputStream(64 * 1024);
-            byte[] buffer = new byte[16 * 1024];
+            ByteArrayOutputStream out = new ByteArrayOutputStream(remote ? 256 * 1024 : 64 * 1024);
+            byte[] buffer = new byte[bufferSize];
             int read;
             while ((read = input.read(buffer)) > 0) {
                 out.write(buffer, 0, read);
@@ -4829,6 +4854,11 @@ public class MainActivity extends Activity {
                     Log.w(TAG, "image too large, skipped: " + uri);
                     return null;
                 }
+            }
+            if (started > 0L) {
+                long ms = Math.max(1L, android.os.SystemClock.elapsedRealtime() - started);
+                Log.d("AsmrIO", String.format("%.1f MB in %d ms = %.2f MB/s  %s",
+                        out.size() / 1048576.0, ms, (out.size() / 1048576.0) * 1000.0 / ms, uri));
             }
             return out.toByteArray();
         } catch (Exception ex) {

@@ -9,10 +9,12 @@ import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import jcifs.CIFSContext;
@@ -52,11 +54,20 @@ final class NetClient {
      */
     private static final Map<String, CIFSContext> SMB_CONTEXTS = new ConcurrentHashMap<>();
 
+    /**
+     * 已建立传输层的源。jcifs 的 transport 是懒建立的：首屏三个并发请求若同时到达，
+     * 会各自建一条传输，每条都要付协商 + NTLM 认证 + tree connect，实测三张图各耗 1s；
+     * 建立完成后反而能跑到 6-13MB/s。这里让首个请求单飞建连，其余等它就绪后复用。
+     */
+    private static final Set<String> WARMED = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+    private static final Map<String, Object> WARM_LOCKS = new ConcurrentHashMap<>();
+
     private NetClient() {
     }
 
     /** 递归列举源内全部文件。maxDepth 限制目录深度。 */
     static List<Entry> list(NetSource src, int maxDepth) throws Exception {
+        ensureWarm(src);
         List<Entry> out = new ArrayList<>();
         if ("ftp".equals(src.type)) {
             FTPClient ftp = connectFtp(src);
@@ -89,6 +100,15 @@ final class NetClient {
             props.setProperty("jcifs.smb.client.connTimeout", "10000");
             props.setProperty("jcifs.smb.client.responseTimeout", "15000");
             props.setProperty("jcifs.smb.client.soTimeout", "15000");
+            // 吞吐关键：jcifs 每个 SMB2 READ 的请求体大小取自 rcv_buf_size（默认 64KB），
+            // 再被调用方的读缓冲截断。默认值下逐张读大图只有 3MB/s 左右，基本是在等往返延迟。
+            // 提到 1MB 后单次请求可覆盖整块数据，配合调用方 256KB 的读缓冲即可跑满链路。
+            props.setProperty("jcifs.smb.client.rcv_buf_size", "1048576");
+            props.setProperty("jcifs.smb.client.snd_buf_size", "1048576");
+            props.setProperty("jcifs.smb.client.maxRequestSize", "1048576");
+            // 单机共享路径无需 DFS 探测，省掉每次列目录/开文件的额外查询
+            props.setProperty("jcifs.smb.client.dfs.disabled", "true");
+            props.setProperty("jcifs.smb.client.disableIdleTimeout", "true");
             CIFSContext base = new BaseContext(new PropertyConfiguration(props));
             CIFSContext result;
             if (src.user == null || src.user.trim().isEmpty()) {
@@ -200,6 +220,8 @@ final class NetClient {
         }
         ftp.enterLocalPassiveMode();
         ftp.setFileType(FTP.BINARY_FILE_TYPE);
+        // commons-net 数据通道默认只有 1KB 缓冲，大文件传输会被系统调用次数拖住
+        ftp.setBufferSize(64 * 1024);
         try {
             ftp.sendCommand("OPTS UTF8", "ON");
         } catch (Exception ignored) {
@@ -289,8 +311,46 @@ final class NetClient {
 
     // ---------------- 流式读取 ----------------
 
+    /**
+     * 预热会话：只访问共享根目录，不做数据传输。失败静默（离线/密码错不影响启动）。
+     */
+    static void warmUp(NetSource src) {
+        ensureWarm(src);
+    }
+
+    /**
+     * 单飞建立 SMB 传输层。
+     * 首个请求独自完成握手，其余线程在锁上等待；就绪后所有并发的读图复用同一条传输。
+     * FTP 每次开流都是独立控制连接，没有可复用的对象，直接标记即可。
+     */
+    private static void ensureWarm(NetSource src) {
+        if (src == null || WARMED.contains(src.id)) {
+            return;
+        }
+        Object lock = WARM_LOCKS.get(src.id);
+        if (lock == null) {
+            Object created = new Object();
+            Object existing = WARM_LOCKS.putIfAbsent(src.id, created);
+            lock = existing != null ? existing : created;
+        }
+        synchronized (lock) {
+            if (WARMED.contains(src.id)) {
+                return;
+            }
+            if (!"ftp".equals(src.type)) {
+                try {
+                    new SmbFile(smbUrl(src, "", true), smbContext(src)).exists();
+                } catch (Exception ignored) {
+                }
+            }
+            // 失败也标记：离线时不该每次开文件都重新等一次超时
+            WARMED.add(src.id);
+        }
+    }
+
     /** 顺序读整个文件（图片/字幕等小文件用）。 */
     static InputStream open(NetSource src, String relPath) throws Exception {
+        ensureWarm(src);
         if ("ftp".equals(src.type)) {
             FTPClient ftp = connectFtp(src);
             InputStream in = ftp.retrieveFileStream(ftpPath(src, relPath));
@@ -307,6 +367,7 @@ final class NetClient {
 
     /** 从 offset 开始读，供本地代理响应 Range 请求（MediaPlayer seek 用）。 */
     static InputStream openRange(NetSource src, String relPath, long offset) throws Exception {
+        ensureWarm(src);
         if ("ftp".equals(src.type)) {
             FTPClient ftp = connectFtp(src);
             if (offset > 0) {

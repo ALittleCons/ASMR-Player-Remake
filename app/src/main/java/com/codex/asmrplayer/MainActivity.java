@@ -61,6 +61,7 @@ import android.webkit.WebViewClient;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -73,6 +74,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -101,7 +105,6 @@ public class MainActivity extends Activity {
     private static final String KEY_TREE_URIS = "tree_uris";
     private static final String KEY_NET_SOURCES = "net_sources";
     private static final long RESCAN_DEBOUNCE_MS = 1200;
-    private static final java.util.regex.Pattern RJ_CODE_PATTERN = java.util.regex.Pattern.compile("rj\\d{2,}");
     private static final long POLL_INTERVAL_MS = 6000;
     /** 含网络路径时自动重扫的最小间隔，避免每 6 秒全量列举远端目录。 */
     private static final long NET_RESCAN_MIN_MS = 60000;
@@ -128,6 +131,18 @@ public class MainActivity extends Activity {
     /** 波形计算、字幕解析等辅助 IO。 */
     private final ExecutorService auxExecutor = Executors.newFixedThreadPool(2);
     private final TextDrawable workPlaceholder = new TextDrawable("ASMR");
+    /**
+     * 缩略图/大图解码在途去重：ListView 复用和动画重入不再重复拉取同一张 SMB 原图。
+     * 用 Collections.newSetFromMap 而非 ConcurrentHashMap.newKeySet()——后者是
+     * Java 8/API 24 新增方法，本项目 minSdk 23 且未启用 core library desugaring。
+     */
+    private final Set<String> coverLoadsInFlight =
+            Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+    private final Set<String> bigImageLoadsInFlight =
+            Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+    /** 等待同一张缩略图的控件；ListView 复用后仍能让后来绑定的行拿到结果（仅主线程访问）。 */
+    private final Map<String, List<ImageView>> coverWaiters = new HashMap<>();
+
     private final LruCache<String, Bitmap> coverCache = new LruCache<String, Bitmap>(8192) {
         @Override
         protected int sizeOf(String key, Bitmap value) {
@@ -2060,7 +2075,7 @@ public class MainActivity extends Activity {
             sectionSubtitleView.setText("已识别 " + works.size() + " 个作品");
             titleView.setText("已识别 " + works.size() + " 个作品");
             lyricView.setText("点击作品查看音轨并播放");
-            showWorkPreview(visibleWorks().get(0));
+            primeCoverFromCache(visibleWorks().get(0));
         }
         if (auto && onWorksPage) {
             statusView.setText("检测到文件变化，已自动刷新");
@@ -2165,7 +2180,7 @@ public class MainActivity extends Activity {
         sectionSubtitleView.setText("已预加载 " + works.size() + " 个作品");
         titleView.setText("已预加载 " + works.size() + " 个作品");
         lyricView.setText("点击作品查看音轨并播放");
-        showWorkPreview(works.get(0));
+        primeCoverFromCache(works.get(0));
         return true;
     }
 
@@ -2183,7 +2198,7 @@ public class MainActivity extends Activity {
     }
 
     private File libraryCacheFile() {
-        return new File(getFilesDir(), "library_cache_v3.json");
+        return new File(getFilesDir(), "library_cache_v4.json");
     }
 
     /** 内容指纹：自动重扫结果没变化时不再重复写盘。 */
@@ -2713,9 +2728,7 @@ public class MainActivity extends Activity {
         titleView.setText(work.name);
         folderView.setText(work.tracks.size() + " 首音轨");
         lyricView.setText("点击音轨开始播放");
-        if (work.cover != null) {
-            showBigImage(work.cover);
-        }
+        primeCoverFromCache(work);
         statusView.setText("作品已打开");
         updateMiniPlayer();
     }
@@ -2735,9 +2748,7 @@ public class MainActivity extends Activity {
         titleView.setText(works.isEmpty() ? "没有识别到 ASMR 音频作品" : "作品列表");
         folderView.setText(works.size() + " 个作品");
         lyricView.setText(works.isEmpty() ? "请选择包含 RJ 文件夹或音频文件的目录" : "点击作品查看音轨并播放");
-        if (activeWork != null && activeWork.cover != null) {
-            showBigImage(activeWork.cover);
-        }
+        primeCoverFromCache(activeWork);
         updateMiniPlayer();
     }
 
@@ -2759,9 +2770,7 @@ public class MainActivity extends Activity {
         MediaItem current = currentPlaybackItem();
         lyricView.setText(current == null ? "点击音轨进入播放页" : "正在播放: " + current.audio.name);
         statusView.setText(currentIndex >= 0 && player != null && player.isPlaying() ? "播放中" : "音轨列表");
-        if (activeWork.cover != null) {
-            showBigImage(activeWork.cover);
-        }
+        primeCoverFromCache(activeWork);
         updateMiniPlayer();
     }
 
@@ -3069,12 +3078,22 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void showWorkPreview(WorkItem work) {
-        if (work.cover != null) {
-            showBigImage(work.cover);
-        } else {
+    /**
+     * 列表页只把「已在内存中」的封面大图放进 coverView，供切换动画衔接使用。
+     * 旧实现在这里调用 showBigImage，会在播放区不可见时仍下载 1200px 大图并
+     * 预取相邻两张，是 SMB 作品列表卡顿的主要来源。
+     */
+    private void primeCoverFromCache(WorkItem work) {
+        FileDoc cover = work == null ? null : work.cover;
+        if (cover == null) {
+            coverView.setTag(null);
             coverView.setImageDrawable(null);
+            return;
         }
+        String key = cover.uri.toString();
+        coverView.setTag(key);
+        Bitmap cached = bigImageCache.get(key);
+        coverView.setImageBitmap(cached != null && !cached.isRecycled() ? cached : null);
     }
 
     private void playAt(int index) {
@@ -3618,14 +3637,10 @@ public class MainActivity extends Activity {
     private void relocateCoverOverlay(FileDoc cover, boolean toThumb, float fromOffsetX) {
         final ImageView overlay = new ImageView(this);
         overlay.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        // 只取已缓存的缩略图；绝不在这里同步解码——动画运行于主线程，
+        // SMB 读整张原图会直接卡住界面
         Bitmap cached = coverCache.get(cover.uri.toString());
-        if (cached == null) {
-            cached = decodeThumbnail(cover.uri, dp(72));
-            if (cached != null) {
-                coverCache.put(cover.uri.toString(), cached);
-            }
-        }
-        if (cached != null) {
+        if (cached != null && !cached.isRecycled()) {
             overlay.setImageBitmap(cached);
         } else {
             overlay.setImageDrawable(workPlaceholder);
@@ -3636,10 +3651,14 @@ public class MainActivity extends Activity {
             coverTopThumb.setVisibility(View.VISIBLE);
             coverTopThumb.setAlpha(0f);
         } else {
-            // 预先把封面大图放进 coverView（若已缓存），保证滑动切入时内容与飞行动画一致
+            // 预先把封面大图放进 coverView（若已缓存），保证滑动切入时内容与飞行动画一致；
+            // 未缓存则按需解码这一张封面，不牵连其它图片
             Bitmap big = bigImageCache.get(cover.uri.toString());
-            if (big != null) {
+            if (big != null && !big.isRecycled()) {
                 coverView.setImageBitmap(big);
+            } else {
+                coverView.setImageBitmap(cached);
+                requestBigImageDecode(cover);
             }
         }
 
@@ -3861,7 +3880,7 @@ public class MainActivity extends Activity {
         imagePeerView.setTranslationX(imagePeerBaseX + coverView.getTranslationX() + side * coverView.getWidth());
     }
 
-    /** 加载预览图：优先缓存，未缓存时异步解码并回填（同时写入 bigImageCache 供松手后零延迟换图）。 */
+    /** 拖动时才加载目标图：命中缓存立即显示，否则发起唯一的按需解码任务。 */
     private void loadPeerImage(FileDoc doc) {
         final String key = doc.uri.toString();
         pendingPeerImageKey = key;
@@ -3870,23 +3889,8 @@ public class MainActivity extends Activity {
             imagePeerView.setImageBitmap(cached);
             return;
         }
-        imagePeerView.setImageDrawable(null);
-        bigImageExecutor.execute(() -> {
-            if (!key.equals(pendingPeerImageKey)) {
-                return;
-            }
-            Bitmap bitmap = decodeSampled(doc.uri, 1200);
-            if (bitmap == null) {
-                return;
-            }
-            bigImageCache.put(key, bitmap);
-            handler.post(() -> {
-                if (key.equals(pendingPeerImageKey)
-                        && imagePeerView.getVisibility() == View.VISIBLE) {
-                    imagePeerView.setImageBitmap(bitmap);
-                }
-            });
-        });
+        imagePeerView.setImageBitmap(coverCache.get(key));
+        requestBigImageDecode(doc);
     }
 
     /** 隐藏相邻图片预览。slideOut=true 时向当前所在侧滑出，false 时立即消失。 */
@@ -3944,6 +3948,10 @@ public class MainActivity extends Activity {
         MediaItem item = currentPlaybackItem();
         if (item == null) {
             return;
+        }
+        if (target >= 0 && target < item.images.size()) {
+            // 用户已经决定切换到这张图，此时才允许加载它（按钮切换没有拖动预览层）
+            requestBigImageDecode(item.images.get(target));
         }
         imageAnimGeneration++;
         final int gen = imageAnimGeneration;
@@ -4074,54 +4082,56 @@ public class MainActivity extends Activity {
         Bitmap cached = bigImageCache.get(key);
         if (cached != null && !cached.isRecycled()) {
             coverView.setImageBitmap(cached);
-            prefetchNeighborImages(currentPlaybackItem());
             return;
         }
-        coverView.setImageDrawable(null);
+        // 优先用「封面缩略图」即时占位：它在作品列表里已加载并落了磁盘缓存，
+        // 这里纯本地读取、零网络。随后只解码当前需要的这一张，不预取其它图片。
+        Bitmap placeholder = coverCache.get(key);
+        if (placeholder == null && playbackWork != null && playbackWork.cover != null) {
+            placeholder = coverCache.get(playbackWork.cover.uri.toString());
+        }
+        coverView.setImageBitmap(placeholder);
+        requestBigImageDecode(doc);
+    }
+
+    /**
+     * 按需解码单张大图：播放页打开时只解码当前显示的封面，滑动/按钮切换到
+     * 其它图片时才解码那一张。同一 key 在途只排一个任务，避免拖动预览与
+     * 正式换图重复拉取 SMB 原图。
+     */
+    private void requestBigImageDecode(FileDoc doc) {
+        if (doc == null) {
+            return;
+        }
+        final String key = doc.uri.toString();
+        if (bigImageCache.get(key) != null || !bigImageLoadsInFlight.add(key)) {
+            return;
+        }
         bigImageExecutor.execute(() -> {
-            // 线程排队期间用户可能已经翻到别的图，直接丢弃过期任务
-            if (!key.equals(pendingBigImageKey)) {
-                return;
+            Bitmap bitmap = null;
+            try {
+                bitmap = decodeSampled(doc.uri, 1200);
+            } catch (Throwable ex) {
+                // 任何异常都必须释放 in-flight 标记，否则这张图本次运行内再也不会被加载
+                Log.w(TAG, "big image decode failed: " + key + " -> " + ex.getMessage());
             }
-            Bitmap bitmap = decodeSampled(doc.uri, 1200);
-            if (bitmap == null) {
-                return;
-            }
-            bigImageCache.put(key, bitmap);
+            final Bitmap result = bitmap;
             handler.post(() -> {
+                bigImageLoadsInFlight.remove(key);
+                if (result == null || result.isRecycled()) {
+                    return;
+                }
+                bigImageCache.put(key, result);
                 if (key.equals(pendingBigImageKey) && key.equals(coverView.getTag())) {
-                    coverView.setImageBitmap(bitmap);
-                    prefetchNeighborImages(currentPlaybackItem());
+                    coverView.setImageBitmap(result);
+                }
+                if (key.equals(pendingPeerImageKey)
+                        && imagePeerView != null
+                        && imagePeerView.getVisibility() == View.VISIBLE) {
+                    imagePeerView.setImageBitmap(result);
                 }
             });
         });
-    }
-
-    /** 低优先级预解码左右相邻图片，滑动时几乎零等待；不与当前大图抢线程池。 */
-    private void prefetchNeighborImages(MediaItem item) {
-        if (item == null || item.images.size() < 2) {
-            return;
-        }
-        for (int offset : new int[]{1, -1}) {
-            int index = currentImageIndex + offset;
-            if (index < 0 || index >= item.images.size()) {
-                continue;
-            }
-            FileDoc doc = item.images.get(index);
-            final String key = doc.uri.toString();
-            if (bigImageCache.get(key) != null) {
-                continue;
-            }
-            imageExecutor.execute(() -> {
-                if (bigImageCache.get(key) != null) {
-                    return;
-                }
-                Bitmap bitmap = decodeSampled(doc.uri, 1200);
-                if (bitmap != null) {
-                    bigImageCache.put(key, bitmap);
-                }
-            });
-        }
     }
 
     private final Map<String, float[]> waveformCache = new HashMap<>();
@@ -4720,28 +4730,104 @@ public class MainActivity extends Activity {
             imageView.setImageDrawable(workPlaceholder);
             return;
         }
-        String key = cover.uri.toString();
+        final String key = cover.uri.toString();
         imageView.setTag(key);
         Bitmap cached = coverCache.get(key);
-        if (cached != null) {
+        if (cached != null && !cached.isRecycled()) {
             imageView.setImageBitmap(cached);
             return;
         }
         imageView.setImageDrawable(workPlaceholder);
-        int targetSize = dp(72);
+        List<ImageView> waiters = coverWaiters.get(key);
+        if (waiters == null) {
+            waiters = new ArrayList<>();
+            coverWaiters.put(key, waiters);
+        }
+        if (!waiters.contains(imageView)) {
+            waiters.add(imageView);
+        }
+        // 同一个 uri 只排一个任务；ListView 快速滚动时不再重复下载整张原图
+        if (!coverLoadsInFlight.add(key)) {
+            return;
+        }
+        final File disk = coverThumbFile(key);
+        final int targetSize = dp(72);
+        final List<ImageView> snapshot = new ArrayList<>(waiters);
         imageExecutor.execute(() -> {
-            Bitmap bitmap = decodeThumbnail(cover.uri, targetSize);
-            if (bitmap == null) {
+            // 快速滚动时该行可能已被复用给别的作品；没有任何等待者就跳过网络读取
+            boolean stillWanted = false;
+            for (ImageView target : snapshot) {
+                if (key.equals(target.getTag())) {
+                    stillWanted = true;
+                    break;
+                }
+            }
+            if (!stillWanted) {
+                handler.post(() -> {
+                    coverLoadsInFlight.remove(key);
+                    coverWaiters.remove(key);
+                });
                 return;
             }
-            coverCache.put(key, bitmap);
+            Bitmap bitmap = null;
+            try {
+                if (disk.isFile() && disk.length() > 0) {
+                    bitmap = BitmapFactory.decodeFile(disk.getAbsolutePath());
+                }
+                if (bitmap == null) {
+                    bitmap = decodeThumbnail(cover.uri, targetSize);
+                    if (bitmap != null) {
+                        saveCoverThumb(disk, bitmap);
+                    }
+                }
+            } catch (Exception ex) {
+                Log.w(TAG, "cover load failed: " + ex.getMessage());
+            }
+            final Bitmap result = bitmap;
             handler.post(() -> {
-                Object tag = imageView.getTag();
-                if (key.equals(tag)) {
-                    imageView.setImageBitmap(bitmap);
+                coverLoadsInFlight.remove(key);
+                List<ImageView> pending = coverWaiters.remove(key);
+                if (result == null || result.isRecycled() || pending == null) {
+                    return;
+                }
+                coverCache.put(key, result);
+                for (ImageView target : pending) {
+                    if (key.equals(target.getTag())) {
+                        target.setImageBitmap(result);
+                    }
                 }
             });
         });
+    }
+
+    /** 缩略图磁盘缓存：SMB 原图只需读取一次，之后冷启动/滚动都读本地小文件。 */
+    private File coverThumbFile(String key) {
+        File dir = new File(getCacheDir(), "cover_thumbs");
+        if (!dir.exists() && !dir.mkdirs()) {
+            Log.w(TAG, "cannot create cover cache dir");
+        }
+        String name = UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8)).toString();
+        return new File(dir, name + ".jpg");
+    }
+
+    private void saveCoverThumb(File target, Bitmap bitmap) {
+        File tmp = new File(target.getParentFile(), target.getName() + ".tmp");
+        try (FileOutputStream out = new FileOutputStream(tmp)) {
+            if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 88, out)) {
+                tmp.delete();
+                return;
+            }
+        } catch (Exception ex) {
+            tmp.delete();
+            return;
+        }
+        if (target.exists() && !target.delete()) {
+            tmp.delete();
+            return;
+        }
+        if (!tmp.renameTo(target)) {
+            tmp.delete();
+        }
     }
 
     /**
@@ -5125,16 +5211,13 @@ public class MainActivity extends Activity {
                 int cmp = NameOrder.compare(left.name, right.name);
                 return cmp != 0 ? cmp : NameOrder.compare(left.relativePath, right.relativePath);
             });
-            // 再把最像封面的那张（main 优先）提到第一位；其余图片的相对顺序完全不变
-            int coverPosition = -1;
-            int bestRank = Integer.MAX_VALUE;
-            for (int i = 0; i < images.size(); i++) {
-                int rank = coverRank(images.get(i).name);
-                if (rank < bestRank) {
-                    bestRank = rank;
-                    coverPosition = i;
-                }
+            // 候选 = 多语言封面关键词图片 + 排序第一位的图片（兜底）。
+            // 只把选中的那张提到第一位，其余图片相对顺序完全不变。
+            List<String> imageNames = new ArrayList<>(images.size());
+            for (FileDoc image : images) {
+                imageNames.add(image.name);
             }
+            int coverPosition = CoverNames.chooseCoverIndex(imageNames);
             if (coverPosition > 0) {
                 images.add(0, images.remove(coverPosition));
             }
@@ -5199,30 +5282,6 @@ public class MainActivity extends Activity {
             return lrcByName.get(stem);
         }
 
-        /** 封面优先级：main 最高，其余关键词/RJ 码逐级降权，保证封面恒为第一张。 */
-        private int coverRank(String name) {
-            String stem = stemStatic(name);
-            if (stem.equals("main")) {
-                return 0;
-            }
-            if (stem.equals("cover") || stem.equals("folder") || stem.equals("fengmian")
-                    || stem.equals("fm") || stem.equals("封面") || stem.equals("front")
-                    || stem.equals("poster") || stem.equals("thumb")) {
-                return 1;
-            }
-            if (stem.matches("(?i)^(?:main|cover|folder|fengmian|front|poster|封面)[\\s_\\-]*\\d{0,3}")) {
-                return 2;
-            }
-            if (stem.contains("cover") || stem.contains("folder") || stem.contains("fengmian")
-                    || stem.contains("封面") || stem.contains("main")
-                    || stem.contains("front") || stem.contains("poster")) {
-                return 3;
-            }
-            if (RJ_CODE_PATTERN.matcher(stem).find()) {
-                return 4;
-            }
-            return 5;
-        }
     }
 
     private static boolean isImageStatic(String lowerName) {

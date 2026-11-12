@@ -32,7 +32,7 @@ import java.util.Map;
  *   3. 先写临时文件再原子替换，写入中断不会损坏旧缓存。
  */
 final class LibraryCache {
-    private static final int VERSION = 3;
+    private static final int VERSION = 4;
 
     private LibraryCache() {
     }

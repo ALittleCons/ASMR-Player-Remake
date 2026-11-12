@@ -32,7 +32,7 @@ import java.util.Map;
  *   3. 先写临时文件再原子替换，写入中断不会损坏旧缓存。
  */
 final class LibraryCache {
-    private static final int VERSION = 2;
+    private static final int VERSION = 3;
 
     private LibraryCache() {
     }
@@ -86,7 +86,11 @@ final class LibraryCache {
             reader.beginObject();
             while (reader.hasNext()) {
                 String field = reader.nextName();
-                if ("works".equals(field)) {
+                if ("v".equals(field)) {
+                    if (reader.nextInt() != VERSION) {
+                        throw new IOException("cache version changed, rescan required");
+                    }
+                } else if ("works".equals(field)) {
                     reader.beginArray();
                     while (reader.hasNext()) {
                         MainActivity.WorkItem work = readWork(reader);

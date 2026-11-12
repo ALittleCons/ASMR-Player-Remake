@@ -45,6 +45,13 @@ final class NetClient {
     /** 文件大小缓存，扫描时填充，供本地代理构造 Content-Length。 */
     private static final Map<String, Long> SIZE_CACHE = new ConcurrentHashMap<>();
 
+    /**
+     * jcifs 上下文缓存：BaseContext/PropertyConfiguration 构造开销大，且每个上下文
+     * 有独立连接池。每次开流都新建会强制重新协商 SMB 会话，图片逐张加载时非常慢。
+     * key 含凭据，改密码后自动使用新上下文。
+     */
+    private static final Map<String, CIFSContext> SMB_CONTEXTS = new ConcurrentHashMap<>();
+
     private NetClient() {
     }
 
@@ -67,22 +74,39 @@ final class NetClient {
     // ---------------- SMB ----------------
 
     private static CIFSContext smbContext(NetSource src) throws Exception {
-        Properties props = new Properties();
-        props.setProperty("jcifs.smb.client.connTimeout", "10000");
-        props.setProperty("jcifs.smb.client.responseTimeout", "15000");
-        props.setProperty("jcifs.smb.client.soTimeout", "15000");
-        CIFSContext base = new BaseContext(new PropertyConfiguration(props));
-        if (src.user == null || src.user.trim().isEmpty()) {
-            return base.withAnonymousCredentials();
+        String cacheKey = src.id + "|" + (src.user == null ? "" : src.user)
+                + "|" + (src.pass == null ? "" : src.pass);
+        CIFSContext cached = SMB_CONTEXTS.get(cacheKey);
+        if (cached != null) {
+            return cached;
         }
-        String domain = "";
-        String user = src.user.trim();
-        int backslash = user.indexOf('\\');
-        if (backslash > 0) {
-            domain = user.substring(0, backslash);
-            user = user.substring(backslash + 1);
+        synchronized (SMB_CONTEXTS) {
+            cached = SMB_CONTEXTS.get(cacheKey);
+            if (cached != null) {
+                return cached;
+            }
+            Properties props = new Properties();
+            props.setProperty("jcifs.smb.client.connTimeout", "10000");
+            props.setProperty("jcifs.smb.client.responseTimeout", "15000");
+            props.setProperty("jcifs.smb.client.soTimeout", "15000");
+            CIFSContext base = new BaseContext(new PropertyConfiguration(props));
+            CIFSContext result;
+            if (src.user == null || src.user.trim().isEmpty()) {
+                result = base.withAnonymousCredentials();
+            } else {
+                String domain = "";
+                String user = src.user.trim();
+                int backslash = user.indexOf('\\');
+                if (backslash > 0) {
+                    domain = user.substring(0, backslash);
+                    user = user.substring(backslash + 1);
+                }
+                result = base.withCredentials(new NtlmPasswordAuthenticator(
+                        domain, user, src.pass == null ? "" : src.pass));
+            }
+            SMB_CONTEXTS.put(cacheKey, result);
+            return result;
         }
-        return base.withCredentials(new NtlmPasswordAuthenticator(domain, user, src.pass == null ? "" : src.pass));
     }
 
     private static String smbUrl(NetSource src, String relPath, boolean trailingSlash) {

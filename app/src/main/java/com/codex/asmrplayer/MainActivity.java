@@ -112,6 +112,7 @@ public class MainActivity extends Activity {
     private static final String KEY_RECENT_AUDIO = "recent_audio";
     private static final String KEY_DARK_THEME = "dark_theme";
     private static final String GITHUB_URL = "https://github.com/Baimo1209/ASMR-Player";
+    private static final String TAG = "AsmrPlayer";
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final List<WorkItem> works = new ArrayList<>();
@@ -120,7 +121,12 @@ public class MainActivity extends Activity {
     private final List<Cue> cues = new ArrayList<>();
     private final List<String> webHistory = new ArrayList<>();
     private final List<RecentTrack> recentTracks = new ArrayList<>();
+    /** 列表缩略图；与播放页大图、波形/字幕分流，避免大库下互相饿死。 */
     private final ExecutorService imageExecutor = Executors.newFixedThreadPool(2);
+    /** 播放页大图 / 相邻预览 / 全屏看图，专用高优先级线程池。 */
+    private final ExecutorService bigImageExecutor = Executors.newFixedThreadPool(2);
+    /** 波形计算、字幕解析等辅助 IO。 */
+    private final ExecutorService auxExecutor = Executors.newFixedThreadPool(2);
     private final TextDrawable workPlaceholder = new TextDrawable("ASMR");
     private final LruCache<String, Bitmap> coverCache = new LruCache<String, Bitmap>(8192) {
         @Override
@@ -235,7 +241,16 @@ public class MainActivity extends Activity {
     private TextView viewerIndexLabel;
     private List<FileDoc> viewerImages;
     private int viewerPosition;
-    private final LruCache<String, Bitmap> bigImageCache = new LruCache<String, Bitmap>(24);
+    /** 大图缓存按字节限制（32MB）；旧版按「24 张」计数，1440px 图会吃到近 200MB 导致解码失败。 */
+    private final LruCache<String, Bitmap> bigImageCache = new LruCache<String, Bitmap>(32 * 1024) {
+        @Override
+        protected int sizeOf(String key, Bitmap value) {
+            return Math.max(1, value.getByteCount() / 1024);
+        }
+    };
+    /** 当前期望显示的大图 key，用于丢弃线程池里已经过期的解码任务。 */
+    private volatile String pendingBigImageKey;
+    private volatile String pendingPeerImageKey;
     private TextView titleView;
     private TextView folderView;
     private TextView lyricView;
@@ -307,6 +322,8 @@ public class MainActivity extends Activity {
         hideFloatingLyrics();
         releasePlayer();
         imageExecutor.shutdownNow();
+        bigImageExecutor.shutdownNow();
+        auxExecutor.shutdownNow();
         scanExecutor.shutdownNow();
         cacheExecutor.shutdownNow();
     }
@@ -374,7 +391,7 @@ public class MainActivity extends Activity {
 
         LinearLayout page = new LinearLayout(this);
         page.setOrientation(LinearLayout.VERTICAL);
-        page.setPadding(0, dp(14), 0, 0);
+        page.setPadding(0, dp(34), 0, 0);
         root.addView(page, new FrameLayout.LayoutParams(-1, -1));
 
         LinearLayout sectionHeader = new LinearLayout(this);
@@ -2166,7 +2183,7 @@ public class MainActivity extends Activity {
     }
 
     private File libraryCacheFile() {
-        return new File(getFilesDir(), "library_cache_v2.json");
+        return new File(getFilesDir(), "library_cache_v3.json");
     }
 
     /** 内容指纹：自动重扫结果没变化时不再重复写盘。 */
@@ -3275,7 +3292,7 @@ public class MainActivity extends Activity {
         boolean isLrc = subtitleFile.name.toLowerCase(Locale.ROOT).endsWith(".lrc");
         Uri subtitleUri = subtitleFile.uri;
         // 网络字幕走原始 socket，禁止在主线程读取，放到后台执行
-        imageExecutor.execute(() -> {
+        auxExecutor.execute(() -> {
             String text;
             try (InputStream input = openStreamFor(subtitleUri)) {
                 if (input == null) {
@@ -3772,7 +3789,7 @@ public class MainActivity extends Activity {
             float dx = event.getRawX() - imageDownX;
             float dy = event.getRawY() - imageDownY;
             if (!imageHorizontalIntent && canSwipe
-                    && Math.abs(dx) > dp(14) && Math.abs(dx) > Math.abs(dy) * 1.1f) {
+                    && Math.abs(dx) > dp(8) && Math.abs(dx) > Math.abs(dy) * 0.85f) {
                 imageHorizontalIntent = true;
             }
             if (imageHorizontalIntent) {
@@ -3790,10 +3807,14 @@ public class MainActivity extends Activity {
                 imageVelocityTracker.recycle();
                 imageVelocityTracker = null;
             }
-            if (imageDragging) {
+            float totalDx = event.getRawX() - imageDownX;
+            float totalDy = event.getRawY() - imageDownY;
+            boolean quickFlick = canSwipe && action == MotionEvent.ACTION_UP
+                    && Math.abs(totalDx) > dp(18) && Math.abs(totalDx) > Math.abs(totalDy) * 0.9f;
+            if (imageDragging || quickFlick) {
                 imageDragging = false;
                 imageHorizontalIntent = false;
-                settlePlayerImage(imageDragBase + (event.getRawX() - imageDownX), velocityX);
+                settlePlayerImage(imageDragBase + totalDx, velocityX);
             }
         }
     }
@@ -3842,19 +3863,29 @@ public class MainActivity extends Activity {
 
     /** 加载预览图：优先缓存，未缓存时异步解码并回填（同时写入 bigImageCache 供松手后零延迟换图）。 */
     private void loadPeerImage(FileDoc doc) {
-        Bitmap cached = bigImageCache.get(doc.uri.toString());
-        if (cached != null) {
+        final String key = doc.uri.toString();
+        pendingPeerImageKey = key;
+        Bitmap cached = bigImageCache.get(key);
+        if (cached != null && !cached.isRecycled()) {
             imagePeerView.setImageBitmap(cached);
             return;
         }
         imagePeerView.setImageDrawable(null);
-        imageExecutor.execute(() -> {
-            Bitmap bitmap = decodeSampled(doc.uri, 1440);
+        bigImageExecutor.execute(() -> {
+            if (!key.equals(pendingPeerImageKey)) {
+                return;
+            }
+            Bitmap bitmap = decodeSampled(doc.uri, 1200);
             if (bitmap == null) {
                 return;
             }
-            bigImageCache.put(doc.uri.toString(), bitmap);
-            handler.post(() -> imagePeerView.setImageBitmap(bitmap));
+            bigImageCache.put(key, bitmap);
+            handler.post(() -> {
+                if (key.equals(pendingPeerImageKey)
+                        && imagePeerView.getVisibility() == View.VISIBLE) {
+                    imagePeerView.setImageBitmap(bitmap);
+                }
+            });
         });
     }
 
@@ -3862,6 +3893,7 @@ public class MainActivity extends Activity {
     private void hideImagePeer(boolean slideOut) {
         int side = imagePeerSide;
         imagePeerSide = 0;
+        pendingPeerImageKey = null;
         if (imagePeerView == null || imagePeerView.getVisibility() != View.VISIBLE) {
             imagePeerIndex = -1;
             return;
@@ -3884,10 +3916,16 @@ public class MainActivity extends Activity {
         float width = Math.max(dp(80), coverView.getWidth());
         int dir = 0;
         if (item != null && item.images.size() > 1) {
-            if (Math.abs(velocityX) > dp(420)) {
+            float absTranslation = Math.abs(translation);
+            float absVelocity = Math.abs(velocityX);
+            if (absVelocity > dp(120) && absTranslation > dp(10)) {
+                // 轻微快速甩动即可翻页
                 dir = velocityX < 0 ? 1 : -1;
-            } else if (Math.abs(translation) > width * 0.4f) {
+            } else if (absTranslation > width * 0.09f) {
+                // 慢速拖动只需约 90px（不到图宽的 1/10）即可翻页
                 dir = translation < 0 ? 1 : -1;
+            } else if (absTranslation > dp(16) && absVelocity > dp(50)) {
+                dir = velocityX < 0 ? 1 : -1;
             }
         }
         if (dir == 0) {
@@ -4030,26 +4068,60 @@ public class MainActivity extends Activity {
     }
 
     private void showBigImage(FileDoc doc) {
-        String key = doc.uri.toString();
+        final String key = doc.uri.toString();
         coverView.setTag(key);
+        pendingBigImageKey = key;
         Bitmap cached = bigImageCache.get(key);
-        if (cached != null) {
+        if (cached != null && !cached.isRecycled()) {
             coverView.setImageBitmap(cached);
+            prefetchNeighborImages(currentPlaybackItem());
             return;
         }
         coverView.setImageDrawable(null);
-        imageExecutor.execute(() -> {
-            Bitmap bitmap = decodeSampled(doc.uri, 1440);
+        bigImageExecutor.execute(() -> {
+            // 线程排队期间用户可能已经翻到别的图，直接丢弃过期任务
+            if (!key.equals(pendingBigImageKey)) {
+                return;
+            }
+            Bitmap bitmap = decodeSampled(doc.uri, 1200);
             if (bitmap == null) {
                 return;
             }
             bigImageCache.put(key, bitmap);
             handler.post(() -> {
-                if (key.equals(coverView.getTag())) {
+                if (key.equals(pendingBigImageKey) && key.equals(coverView.getTag())) {
                     coverView.setImageBitmap(bitmap);
+                    prefetchNeighborImages(currentPlaybackItem());
                 }
             });
         });
+    }
+
+    /** 低优先级预解码左右相邻图片，滑动时几乎零等待；不与当前大图抢线程池。 */
+    private void prefetchNeighborImages(MediaItem item) {
+        if (item == null || item.images.size() < 2) {
+            return;
+        }
+        for (int offset : new int[]{1, -1}) {
+            int index = currentImageIndex + offset;
+            if (index < 0 || index >= item.images.size()) {
+                continue;
+            }
+            FileDoc doc = item.images.get(index);
+            final String key = doc.uri.toString();
+            if (bigImageCache.get(key) != null) {
+                continue;
+            }
+            imageExecutor.execute(() -> {
+                if (bigImageCache.get(key) != null) {
+                    return;
+                }
+                Bitmap bitmap = decodeSampled(doc.uri, 1200);
+                if (bitmap != null) {
+                    bigImageCache.put(key, bitmap);
+                }
+            });
+        }
     }
 
     private final Map<String, float[]> waveformCache = new HashMap<>();
@@ -4064,7 +4136,7 @@ public class MainActivity extends Activity {
             waveform.setWaveform(cached);
             return;
         }
-        imageExecutor.execute(() -> {
+        auxExecutor.execute(() -> {
             float[] data = computeWaveform(uri, durationMs);
             if (data == null) {
                 return;
@@ -4267,11 +4339,11 @@ public class MainActivity extends Activity {
             return;
         }
         viewerOverlay = new FrameLayout(this);
-        viewerOverlay.setBackgroundColor(Color.BLACK);
+        viewerOverlay.setBackgroundColor(Color.WHITE);
         viewerImage = new ZoomImageView(this);
         viewerOverlay.addView(viewerImage, new FrameLayout.LayoutParams(-1, -1));
 
-        TextView closeButton = label("✕", 22, Color.WHITE);
+        TextView closeButton = label("✕", 22, Color.rgb(36, 40, 48));
         closeButton.setGravity(Gravity.CENTER);
         closeButton.setPadding(dp(16), dp(8), dp(16), dp(8));
         closeButton.setOnClickListener(v -> closeImageViewer());
@@ -4286,14 +4358,14 @@ public class MainActivity extends Activity {
 
         Button prevButton = new Button(this);
         prevButton.setText("‹");
-        prevButton.setTextColor(Color.WHITE);
+        prevButton.setTextColor(Color.rgb(36, 40, 48));
         prevButton.setTextSize(24);
         prevButton.setAllCaps(false);
         prevButton.setBackgroundColor(Color.TRANSPARENT);
         prevButton.setOnClickListener(v -> viewerSwitch(-1));
         viewerBar.addView(prevButton, new LinearLayout.LayoutParams(dp(64), -2));
 
-        viewerIndexLabel = label("", 13, Color.rgb(200, 206, 214));
+        viewerIndexLabel = label("", 13, Color.rgb(96, 104, 116));
         viewerIndexLabel.setGravity(Gravity.CENTER);
         viewerIndexLabel.setSingleLine(true);
         viewerIndexLabel.setEllipsize(TextUtils.TruncateAt.MIDDLE);
@@ -4301,7 +4373,7 @@ public class MainActivity extends Activity {
 
         Button nextButton = new Button(this);
         nextButton.setText("›");
-        nextButton.setTextColor(Color.WHITE);
+        nextButton.setTextColor(Color.rgb(36, 40, 48));
         nextButton.setTextSize(24);
         nextButton.setAllCaps(false);
         nextButton.setBackgroundColor(Color.TRANSPARENT);
@@ -4338,7 +4410,7 @@ public class MainActivity extends Activity {
         viewerImage.setBitmap(null);
         viewerIndexLabel.setText((position + 1) + " / " + viewerImages.size() + " · " + doc.name + " · 双指缩放");
         final ZoomImageView target = viewerImage;
-        imageExecutor.execute(() -> {
+        bigImageExecutor.execute(() -> {
             Bitmap bitmap = decodeSampled(uri, 2048);
             if (bitmap == null) {
                 return;
@@ -4672,16 +4744,42 @@ public class MainActivity extends Activity {
         });
     }
 
+    /**
+     * 一次把图片读进内存再从字节数组解码。
+     * 旧实现为「查尺寸 + 解码」各开一次流；对 SMB/FTP 意味着每张图重新协商两次会话，
+     * 在 NAS 上会明显卡顿甚至超时。这里只建立一个连接。
+     */
+    private byte[] readImageBytes(Uri uri) {
+        try (InputStream input = openStreamFor(uri)) {
+            if (input == null) {
+                return null;
+            }
+            ByteArrayOutputStream out = new ByteArrayOutputStream(64 * 1024);
+            byte[] buffer = new byte[16 * 1024];
+            int read;
+            while ((read = input.read(buffer)) > 0) {
+                out.write(buffer, 0, read);
+                if (out.size() > 32 * 1024 * 1024) {
+                    Log.w(TAG, "image too large, skipped: " + uri);
+                    return null;
+                }
+            }
+            return out.toByteArray();
+        } catch (Exception ex) {
+            Log.w(TAG, "read image failed: " + uri + " -> " + ex.getMessage());
+            return null;
+        }
+    }
+
     private Bitmap decodeThumbnail(Uri uri, int targetSize) {
+        byte[] bytes = readImageBytes(uri);
+        if (bytes == null) {
+            return null;
+        }
         try {
             BitmapFactory.Options bounds = new BitmapFactory.Options();
             bounds.inJustDecodeBounds = true;
-            try (InputStream input = openStreamFor(uri)) {
-                if (input == null) {
-                    return null;
-                }
-                BitmapFactory.decodeStream(input, null, bounds);
-            }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
             int sampleSize = 1;
             while ((bounds.outWidth / sampleSize) > targetSize * 2
                     || (bounds.outHeight / sampleSize) > targetSize * 2) {
@@ -4690,43 +4788,42 @@ public class MainActivity extends Activity {
             BitmapFactory.Options options = new BitmapFactory.Options();
             options.inSampleSize = Math.max(1, sampleSize);
             options.inPreferredConfig = Bitmap.Config.RGB_565;
-            try (InputStream input = openStreamFor(uri)) {
-                if (input == null) {
-                    return null;
-                }
-                return BitmapFactory.decodeStream(input, null, options);
-            }
-        } catch (Exception ignored) {
+            return BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);
+        } catch (OutOfMemoryError ex) {
+            Log.w(TAG, "decodeThumbnail OOM: " + uri);
+            return null;
+        } catch (Exception ex) {
+            Log.w(TAG, "decodeThumbnail failed: " + uri + " -> " + ex.getMessage());
             return null;
         }
     }
 
     private Bitmap decodeSampled(Uri uri, int maxDim) {
+        byte[] bytes = readImageBytes(uri);
+        if (bytes == null) {
+            return null;
+        }
         try {
             BitmapFactory.Options bounds = new BitmapFactory.Options();
             bounds.inJustDecodeBounds = true;
-            try (InputStream input = openStreamFor(uri)) {
-                if (input == null) {
-                    return null;
-                }
-                BitmapFactory.decodeStream(input, null, bounds);
-            }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
             if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
                 return null;
             }
+            // 按最长边降采样；旧实现用 && 判断宽高，超宽/超高图完全不降采样会撑爆内存
+            int maxSide = Math.max(bounds.outWidth, bounds.outHeight);
             int sampleSize = 1;
-            while (bounds.outWidth / (sampleSize * 2) >= maxDim && bounds.outHeight / (sampleSize * 2) >= maxDim) {
+            while (maxSide / (sampleSize * 2) >= maxDim) {
                 sampleSize *= 2;
             }
             BitmapFactory.Options options = new BitmapFactory.Options();
             options.inSampleSize = sampleSize;
-            try (InputStream input = openStreamFor(uri)) {
-                if (input == null) {
-                    return null;
-                }
-                return BitmapFactory.decodeStream(input, null, options);
-            }
-        } catch (Exception ignored) {
+            return BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);
+        } catch (OutOfMemoryError ex) {
+            Log.w(TAG, "decodeSampled OOM: " + uri);
+            return null;
+        } catch (Exception ex) {
+            Log.w(TAG, "decodeSampled failed: " + uri + " -> " + ex.getMessage());
             return null;
         }
     }
@@ -5018,11 +5115,29 @@ public class MainActivity extends Activity {
         }
 
         WorkItem toWork(Collator collator) {
-            Collections.sort(audio, (left, right) -> collator.compare(left.relativePath, right.relativePath));
-            Collections.sort(images, (left, right) -> {
-                int rank = coverRank(left.name) - coverRank(right.name);
-                return rank != 0 ? rank : collator.compare(left.name, right.name);
+            // collator 仅用于作品名排序；资源一律走固定全序 NameOrder
+            Collections.sort(audio, (left, right) -> {
+                int cmp = NameOrder.compare(left.name, right.name);
+                return cmp != 0 ? cmp : NameOrder.compare(left.relativePath, right.relativePath);
             });
+            // 先给全部图片一个与音轨一致的固定顺序
+            Collections.sort(images, (left, right) -> {
+                int cmp = NameOrder.compare(left.name, right.name);
+                return cmp != 0 ? cmp : NameOrder.compare(left.relativePath, right.relativePath);
+            });
+            // 再把最像封面的那张（main 优先）提到第一位；其余图片的相对顺序完全不变
+            int coverPosition = -1;
+            int bestRank = Integer.MAX_VALUE;
+            for (int i = 0; i < images.size(); i++) {
+                int rank = coverRank(images.get(i).name);
+                if (rank < bestRank) {
+                    bestRank = rank;
+                    coverPosition = i;
+                }
+            }
+            if (coverPosition > 0) {
+                images.add(0, images.remove(coverPosition));
+            }
             FileDoc cover = images.isEmpty() ? null : images.get(0);
             List<MediaItem> tracks = new ArrayList<>();
             for (FileDoc file : audio) {
@@ -5038,11 +5153,8 @@ public class MainActivity extends Activity {
             addUnique(result, cover);
             FileDoc sameName = imageByStem.get(stemStatic(audioFile.name));
             addUnique(result, sameName);
-            for (FileDoc image : images) {
-                if (image.parentPath.equals(audioFile.parentPath)) {
-                    addUnique(result, image);
-                }
-            }
+            // 其余图片一律按统一固定顺序追加；旧版「同目录优先」会让同一作品内
+            // 不同音轨看到的图片顺序不一致
             for (FileDoc image : images) {
                 addUnique(result, image);
             }
@@ -5087,19 +5199,29 @@ public class MainActivity extends Activity {
             return lrcByName.get(stem);
         }
 
+        /** 封面优先级：main 最高，其余关键词/RJ 码逐级降权，保证封面恒为第一张。 */
         private int coverRank(String name) {
-            String lower = name.toLowerCase(Locale.ROOT);
             String stem = stemStatic(name);
-            if (stem.equals("fengmian") || stem.equals("fm") || stem.equals("cover") || stem.equals("folder")
-                    || stem.equals("main") || stem.equals("封面")
-                    || lower.startsWith("fengmian") || lower.contains("fengmian")
-                    || lower.contains("封面") || lower.contains("cover") || lower.contains("folder")) {
+            if (stem.equals("main")) {
                 return 0;
             }
-            if (RJ_CODE_PATTERN.matcher(lower).find()) {
+            if (stem.equals("cover") || stem.equals("folder") || stem.equals("fengmian")
+                    || stem.equals("fm") || stem.equals("封面") || stem.equals("front")
+                    || stem.equals("poster") || stem.equals("thumb")) {
                 return 1;
             }
-            return 2;
+            if (stem.matches("(?i)^(?:main|cover|folder|fengmian|front|poster|封面)[\\s_\\-]*\\d{0,3}")) {
+                return 2;
+            }
+            if (stem.contains("cover") || stem.contains("folder") || stem.contains("fengmian")
+                    || stem.contains("封面") || stem.contains("main")
+                    || stem.contains("front") || stem.contains("poster")) {
+                return 3;
+            }
+            if (RJ_CODE_PATTERN.matcher(stem).find()) {
+                return 4;
+            }
+            return 5;
         }
     }
 

@@ -251,6 +251,8 @@ public class MainActivity extends Activity {
     private int imagePeerSide;
     private float imagePeerBaseX;
     private float imagePeerBaseY;
+    /** 正在进行的换图动画目标索引；-1 表示没有待收尾的换图。 */
+    private int imageSettleTarget = -1;
     private FrameLayout viewerOverlay;
     private ZoomImageView viewerImage;
     private TextView viewerIndexLabel;
@@ -3539,10 +3541,20 @@ public class MainActivity extends Activity {
     }
 
     private void showCurrentTrackImage() {
+        showCurrentTrackImage(false);
+    }
+
+    /**
+     * @param animateThumbIn 顶部封面小图是否淡入。从封面滑到其它图时缩略图是
+     *                       「新出现」的，淡入比直接闪现柔和；其它场景直接到位，
+     *                       避免上次淡出残留的 alpha 0 让它变成隐形。
+     */
+    private void showCurrentTrackImage(boolean animateThumbIn) {
         MediaItem item = currentPlaybackItem();
         if (item == null) {
             coverView.setImageDrawable(null);
             coverTopThumb.setVisibility(View.GONE);
+            coverTopThumb.setAlpha(1f);
             if (imageIndicator != null) {
                 imageIndicator.setVisibility(View.GONE);
             }
@@ -3560,21 +3572,47 @@ public class MainActivity extends Activity {
         } else {
             coverView.setImageDrawable(null);
         }
-        FileDoc cover = playbackWork != null ? playbackWork.cover : (item.images.isEmpty() ? null : item.images.get(0));
-        boolean showThumb = currentImageIndex > 0 && cover != null;
-        if (showThumb) {
-            coverTopThumb.setVisibility(View.VISIBLE);
-            if (!coverRelocationInFlight) {
-                loadCoverInto(coverTopThumb, cover);
-            }
-        } else {
-            coverTopThumb.setVisibility(View.GONE);
-        }
+        updateCoverThumbState(animateThumbIn);
         if (item.images.size() > 1) {
             imageIndicator.setVisibility(View.VISIBLE);
             imageIndexText.setText((currentImageIndex + 1) + " / " + item.images.size());
         } else {
             imageIndicator.setVisibility(View.GONE);
+        }
+    }
+
+    /**
+     * 顶部封面小图只在「不在封面」时出现。
+     * 旧实现用一张飞行 overlay 做大图↔小图的位置迁移，但 overlay 与拖动中的图
+     * 是两套渲染载体，接缝处必然闪一帧；改成纯淡入淡出后，滑动全程只有并排的
+     * 两张图，没有任何额外图层参与。
+     */
+    private void updateCoverThumbState(boolean animateAppear) {
+        MediaItem item = currentPlaybackItem();
+        FileDoc cover = null;
+        if (item != null) {
+            cover = playbackWork != null && playbackWork.cover != null
+                    ? playbackWork.cover
+                    : (item.images.isEmpty() ? null : item.images.get(0));
+        }
+        boolean show = item != null && cover != null && !item.images.isEmpty()
+                && currentImageIndex > 0;
+        if (!show) {
+            coverTopThumb.animate().cancel();
+            coverTopThumb.setVisibility(View.GONE);
+            coverTopThumb.setAlpha(1f);
+            return;
+        }
+        loadCoverInto(coverTopThumb, cover);
+        if (coverTopThumb.getVisibility() != View.VISIBLE) {
+            coverTopThumb.setVisibility(View.VISIBLE);
+            coverTopThumb.setAlpha(animateAppear ? 0f : 1f);
+        }
+        if (animateAppear && coverTopThumb.getAlpha() < 1f) {
+            coverTopThumb.animate().alpha(1f).setDuration(220).start();
+        } else if (!animateAppear) {
+            coverTopThumb.animate().cancel();
+            coverTopThumb.setAlpha(1f);
         }
     }
 
@@ -3602,29 +3640,6 @@ public class MainActivity extends Activity {
         return Math.max(0, Math.min(currentImageIndex, item.images.size() - 1));
     }
 
-    private boolean coverRelocationInFlight;
-
-    private void animateCoverRelocationIfNeeded(int prevIndex, int newIndex, float fromOffsetX) {
-        if (prevIndex == newIndex) {
-            return;
-        }
-        MediaItem item = currentPlaybackItem();
-        if (item == null) {
-            return;
-        }
-        FileDoc cover = playbackWork != null && playbackWork.cover != null
-                ? playbackWork.cover
-                : (!item.images.isEmpty() ? item.images.get(0) : null);
-        if (cover == null) {
-            return;
-        }
-        if (prevIndex == 0 && newIndex > 0) {
-            relocateCoverOverlay(cover, true, fromOffsetX);
-        } else if (prevIndex > 0 && newIndex == 0) {
-            relocateCoverOverlay(cover, false, 0f);
-        }
-    }
-
     private int[] rectOnRoot(View view, int[] rootLoc) {
         int[] loc = new int[2];
         view.getLocationOnScreen(loc);
@@ -3632,149 +3647,6 @@ public class MainActivity extends Activity {
                 loc[0] - rootLoc[0] - Math.round(view.getTranslationX()),
                 loc[1] - rootLoc[1] - Math.round(view.getTranslationY())
         };
-    }
-
-    private void relocateCoverOverlay(FileDoc cover, boolean toThumb, float fromOffsetX) {
-        final ImageView overlay = new ImageView(this);
-        overlay.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        // 只取已缓存的缩略图；绝不在这里同步解码——动画运行于主线程，
-        // SMB 读整张原图会直接卡住界面
-        Bitmap cached = coverCache.get(cover.uri.toString());
-        if (cached != null && !cached.isRecycled()) {
-            overlay.setImageBitmap(cached);
-        } else {
-            overlay.setImageDrawable(workPlaceholder);
-        }
-
-        coverRelocationInFlight = true;
-        if (toThumb) {
-            coverTopThumb.setVisibility(View.VISIBLE);
-            coverTopThumb.setAlpha(0f);
-        } else {
-            // 预先把封面大图放进 coverView（若已缓存），保证滑动切入时内容与飞行动画一致；
-            // 未缓存则按需解码这一张封面，不牵连其它图片
-            Bitmap big = bigImageCache.get(cover.uri.toString());
-            if (big != null && !big.isRecycled()) {
-                coverView.setImageBitmap(big);
-            } else {
-                coverView.setImageBitmap(cached);
-                requestBigImageDecode(cover);
-            }
-        }
-
-        final int[] rootLoc = new int[2];
-        rootLayout.getLocationOnScreen(rootLoc);
-        final Bitmap aspectSource = cached;
-        if (toThumb) {
-            // 立即把迁移 overlay 放在封面当前显示位置（起点不依赖缩略图布局），
-            // 消除松手后缩略图 post 布局完成前封面闪没的一帧
-            int[] startRect = fitRectOnRoot(coverView, rootLoc, aspectSource);
-            startRect[0] += Math.round(fromOffsetX);
-            if (startRect[2] > 0 && startRect[3] > 0) {
-                overlay.setTranslationX(startRect[0]);
-                overlay.setTranslationY(startRect[1]);
-                overlay.setPivotX(0f);
-                overlay.setPivotY(0f);
-                overlay.setScaleX(1f);
-                overlay.setScaleY(1f);
-                rootLayout.addView(overlay, new FrameLayout.LayoutParams(
-                        startRect[2], startRect[3], Gravity.TOP | Gravity.START));
-                overlay.bringToFront();
-            }
-        }
-        coverTopThumb.post(() -> {
-            int[] fromRect;
-            int[] toRect;
-            int srcW;
-            int srcH;
-            int dstW;
-            int dstH;
-            if (toThumb) {
-                fromRect = fitRectOnRoot(coverView, rootLoc, aspectSource);
-                // 支持从封面被拖到的位置起飞，避免迁移与出场动画重复
-                fromRect[0] += Math.round(fromOffsetX);
-                toRect = rectOnRoot(coverTopThumb, rootLoc);
-                srcW = fromRect[2];
-                srcH = fromRect[3];
-                dstW = coverTopThumb.getWidth();
-                dstH = coverTopThumb.getHeight();
-            } else {
-                fromRect = rectOnRoot(coverTopThumb, rootLoc);
-                toRect = fitRectOnRoot(coverView, rootLoc, aspectSource);
-                srcW = coverTopThumb.getWidth();
-                srcH = coverTopThumb.getHeight();
-                dstW = toRect[2];
-                dstH = toRect[3];
-                coverTopThumb.setVisibility(View.GONE);
-            }
-            if (srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0) {
-                finishCoverRelocation(toThumb);
-                rootLayout.removeView(overlay);
-                return;
-            }
-            if (overlay.getParent() == null) {
-                // toThumb 分支已在 post 前立即添加；其余情况（回封面）此时添加
-                FrameLayout.LayoutParams overlayParams =
-                        new FrameLayout.LayoutParams(srcW, srcH, Gravity.TOP | Gravity.START);
-                overlay.setTranslationX(fromRect[0]);
-                overlay.setTranslationY(fromRect[1]);
-                overlay.setPivotX(0f);
-                overlay.setPivotY(0f);
-                overlay.setScaleX(1f);
-                overlay.setScaleY(1f);
-                rootLayout.addView(overlay, overlayParams);
-                overlay.bringToFront();
-            }
-            overlay.animate().translationX(toRect[0]).translationY(toRect[1])
-                    .scaleX(dstW / (float) srcW).scaleY(dstH / (float) srcH)
-                    .setDuration(320)
-                    .setInterpolator(new android.view.animation.DecelerateInterpolator())
-                    .withEndAction(() -> {
-                        finishCoverRelocation(toThumb);
-                        rootLayout.removeView(overlay);
-                    }).start();
-        });
-    }
-
-    /** 计算 bitmap 在 view 内按 FIT_CENTER 展示时的实际显示矩形（root 坐标 x,y,宽,高）。 */
-    private int[] fitRectOnRoot(View view, int[] rootLoc, Bitmap bitmap) {
-        int[] pos = rectOnRoot(view, rootLoc);
-        int w = view.getWidth();
-        int h = view.getHeight();
-        int innerW = w;
-        int innerH = h;
-        if (bitmap != null && w > 0 && h > 0) {
-            float aspect = bitmap.getWidth() / (float) bitmap.getHeight();
-            float viewAspect = w / (float) h;
-            if (viewAspect > aspect) {
-                innerH = h;
-                innerW = Math.round(h * aspect);
-            } else {
-                innerW = w;
-                innerH = Math.round(w / aspect);
-            }
-        }
-        return new int[]{
-                pos[0] + (w - innerW) / 2,
-                pos[1] + (h - innerH) / 2,
-                innerW,
-                innerH
-        };
-    }
-
-    private void finishCoverRelocation(boolean toThumb) {
-        coverRelocationInFlight = false;
-        coverTopThumb.setAlpha(1f);
-        if (toThumb) {
-            MediaItem item = currentPlaybackItem();
-            FileDoc cover = null;
-            if (item != null) {
-                cover = playbackWork != null && playbackWork.cover != null
-                        ? playbackWork.cover
-                        : (!item.images.isEmpty() ? item.images.get(0) : null);
-            }
-            loadCoverInto(coverTopThumb, cover);
-        }
     }
 
     private void handleImageTouch(MotionEvent event) {
@@ -3790,9 +3662,15 @@ public class MainActivity extends Activity {
             imageDownY = event.getRawY();
             imageHorizontalIntent = false;
             if (imageSwitching) {
-                coverView.animate().cancel();
-                imageSwitching = false;
-                imageAnimGeneration++;
+                if (imageSettleTarget >= 0 && imageSettleTarget != currentImageIndex) {
+                    // 换图动画被打断：立刻收尾到目标状态。否则 coverView 会停在
+                    // 半路、内容却还是旧图，下一次拖动就把残留偏移算进总位移，
+                    // 方向判定随之错乱。
+                    finishImageSwitch(imageSettleTarget);
+                } else {
+                    coverView.animate().cancel();
+                    imageSwitching = false;
+                }
             }
             hideImagePeer(false);
             imageDragBase = coverView.getTranslationX();
@@ -3838,13 +3716,64 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 拖动时更新相邻图片预览：跟随 coverView 显示方向对应的目标图并预解码。 */
+    /** peer 层的基准位置：coverView 未平移时的 root 坐标。 */
+    private void ensurePeerBase() {
+        int[] rootLoc = new int[2];
+        rootLayout.getLocationOnScreen(rootLoc);
+        int[] pos = rectOnRoot(coverView, rootLoc);
+        imagePeerBaseX = pos[0];
+        imagePeerBaseY = pos[1];
+        FrameLayout.LayoutParams p = (FrameLayout.LayoutParams) imagePeerView.getLayoutParams();
+        if (p.width != coverView.getWidth() || p.height != coverView.getHeight()) {
+            p.width = coverView.getWidth();
+            p.height = coverView.getHeight();
+            imagePeerView.setLayoutParams(p);
+        }
+        imagePeerView.setTranslationY(imagePeerBaseY);
+    }
+
+    /**
+     * 把指定图片放进 peer 层。大图未命中缓存时先用封面缩略图占位（与
+     * {@link #showBigImage} 的占位策略一致，交接时不会换内容），再发起唯一的
+     * 按需解码（pendingPeerImageKey 保证解码完成后回填到这一层）。
+     */
+    private void bindPeerImage(FileDoc doc) {
+        final String key = doc.uri.toString();
+        pendingPeerImageKey = key;
+        Bitmap cached = bigImageCache.get(key);
+        if (cached != null && !cached.isRecycled()) {
+            imagePeerView.setImageBitmap(cached);
+            return;
+        }
+        Bitmap thumb = coverCache.get(key);
+        if (thumb == null && playbackWork != null && playbackWork.cover != null) {
+            thumb = coverCache.get(playbackWork.cover.uri.toString());
+        }
+        if (thumb != null && !thumb.isRecycled()) {
+            imagePeerView.setImageBitmap(thumb);
+        } else {
+            // 不要用整屏大小的 "ASMR" 灰字占位：那比短暂留白更突兀
+            imagePeerView.setImageDrawable(null);
+        }
+        requestBigImageDecode(doc);
+    }
+
+    /**
+     * 拖动时更新相邻图片预览：目标图与当前图并排跟随手指。
+     * 这里只负责「跟随」；松手后的进场由 {@link #beginImageSettle} 沿同一条轨迹
+     * 接管，中途不换渲染载体，因此不会出现预览层停住、新图再从别处滑入的断裂。
+     */
     private void updateImagePeer(MediaItem item, float dx) {
         if (item == null || item.images.size() <= 1) {
             hideImagePeer(false);
             return;
         }
         int side = dx < 0 ? 1 : -1;
+        // 拖动刚跨过原点时方向会抖动，若跟着翻转，预览图会整屏瞬移一次。
+        // 方向已确定后，位移落在这个死区内就保持原方向。
+        if (imagePeerSide != 0 && side != imagePeerSide && Math.abs(dx) < dp(24)) {
+            side = imagePeerSide;
+        }
         int peerIdx = currentImageIndex + side;
         if (peerIdx < 0 || peerIdx >= item.images.size()) {
             hideImagePeer(false);
@@ -3853,19 +3782,11 @@ public class MainActivity extends Activity {
         if (imagePeerView.getVisibility() != View.VISIBLE
                 || imagePeerView.getWidth() != coverView.getWidth()
                 || imagePeerView.getHeight() != coverView.getHeight()) {
-            int[] rootLoc = new int[2];
-            rootLayout.getLocationOnScreen(rootLoc);
-            int[] pos = rectOnRoot(coverView, rootLoc);
-            imagePeerBaseX = pos[0];
-            imagePeerBaseY = pos[1];
-            FrameLayout.LayoutParams p = (FrameLayout.LayoutParams) imagePeerView.getLayoutParams();
-            p.width = coverView.getWidth();
-            p.height = coverView.getHeight();
-            imagePeerView.setLayoutParams(p);
-            imagePeerView.setTranslationY(imagePeerBaseY);
+            ensurePeerBase();
         }
         if (imagePeerView.getVisibility() != View.VISIBLE) {
-            imagePeerView.setTranslationX(imagePeerBaseX + coverView.getTranslationX() + side * coverView.getWidth());
+            imagePeerView.setTranslationX(
+                    imagePeerBaseX + coverView.getTranslationX() + side * coverView.getWidth());
             imagePeerView.setVisibility(View.VISIBLE);
             imagePeerView.bringToFront();
         }
@@ -3875,22 +3796,10 @@ public class MainActivity extends Activity {
         }
         if (imagePeerIndex != peerIdx) {
             imagePeerIndex = peerIdx;
-            loadPeerImage(item.images.get(peerIdx));
+            bindPeerImage(item.images.get(peerIdx));
         }
-        imagePeerView.setTranslationX(imagePeerBaseX + coverView.getTranslationX() + side * coverView.getWidth());
-    }
-
-    /** 拖动时才加载目标图：命中缓存立即显示，否则发起唯一的按需解码任务。 */
-    private void loadPeerImage(FileDoc doc) {
-        final String key = doc.uri.toString();
-        pendingPeerImageKey = key;
-        Bitmap cached = bigImageCache.get(key);
-        if (cached != null && !cached.isRecycled()) {
-            imagePeerView.setImageBitmap(cached);
-            return;
-        }
-        imagePeerView.setImageBitmap(coverCache.get(key));
-        requestBigImageDecode(doc);
+        imagePeerView.setTranslationX(
+                imagePeerBaseX + coverView.getTranslationX() + side * coverView.getWidth());
     }
 
     /** 隐藏相邻图片预览。slideOut=true 时向当前所在侧滑出，false 时立即消失。 */
@@ -3922,13 +3831,14 @@ public class MainActivity extends Activity {
         if (item != null && item.images.size() > 1) {
             float absTranslation = Math.abs(translation);
             float absVelocity = Math.abs(velocityX);
-            if (absVelocity > dp(120) && absTranslation > dp(10)) {
-                // 轻微快速甩动即可翻页
-                dir = velocityX < 0 ? 1 : -1;
-            } else if (absTranslation > width * 0.09f) {
-                // 慢速拖动只需约 90px（不到图宽的 1/10）即可翻页
+            if (absTranslation >= width * 0.09f) {
+                // 位移过了阈值，方向一律以「图被拖到了哪一侧」为准。
+                // 旧实现优先采信 VelocityTracker 的末帧速度，而手指抬起前一两帧
+                // 常有反向回弹，velocityX 一变号就把左滑判成右滑：新图滑到一半
+                // 又弹回去，反而切到了反方向的上一张。
                 dir = translation < 0 ? 1 : -1;
-            } else if (absTranslation > dp(16) && absVelocity > dp(50)) {
+            } else if (absTranslation >= dp(12) && absVelocity >= dp(520)) {
+                // 位移不足以判断方向时，才用速度兜底，且要求是一次明确的快速轻扫
                 dir = velocityX < 0 ? 1 : -1;
             }
         }
@@ -3941,110 +3851,171 @@ public class MainActivity extends Activity {
             springImageBack();
             return;
         }
-        beginImageSettle(dir, target);
+        beginImageSettle(dir, target, velocityX);
     }
 
-    private void beginImageSettle(int dir, int target) {
+    /**
+     * 换图动画：旧图（coverView）与新图（imagePeerView）始终相隔一个图宽并排，
+     * 用同一时长、同一插值同时滑动，所以整个过程中两者严丝合缝。
+     *
+     * 旧实现是「旧图滑出 → 换内容 → 新图滑入」的串行动画：松手后旧图继续滑，
+     * 预览层却停在原地，等旧图滑完新图才动，中间必然顿一下；换内容又发生在动画
+     * 末尾，目标图没解码完就会闪出占位图。现在整段只有一个交接点，且发生在两张
+     * 图完全重合的位置（都在原位、同一张图），肉眼无法分辨。
+     */
+    private void beginImageSettle(int dir, int target, float velocityX) {
         MediaItem item = currentPlaybackItem();
-        if (item == null) {
+        if (item == null || target < 0 || target >= item.images.size()) {
             return;
         }
-        if (target >= 0 && target < item.images.size()) {
-            // 用户已经决定切换到这张图，此时才允许加载它（按钮切换没有拖动预览层）
-            requestBigImageDecode(item.images.get(target));
-        }
+        // 用户已经决定切到这张图，此时才允许加载它（按钮切换没有拖动预览层）
+        requestBigImageDecode(item.images.get(target));
+
         imageAnimGeneration++;
         final int gen = imageAnimGeneration;
         imageSwitching = true;
+        imageSettleTarget = target;
+
         float width = Math.max(dp(80), coverView.getWidth());
-        float startX = coverView.getTranslationX();
-        float outX = -dir * width;
-        long outDuration = Math.max(90, (long) (220 * Math.abs(startX - outX) / width));
-        FileDoc cover = playbackWork != null && playbackWork.cover != null
-                ? playbackWork.cover
-                : (!item.images.isEmpty() ? item.images.get(0) : null);
         int prev = currentImageIndex;
-        if (prev == 0 && target > 0 && cover != null) {
-            // 离开封面：封面不做滑出，直接从当前拖动位置迁移到顶部缩略图；
-            // 新图已在拖动时由预览层显示并预解码，松手后 coverView 接管预览
-            // 的位置（无缝），继续滑入到位
-            float dragX = coverView.getTranslationX();
-            currentImageIndex = target;
-            animateCoverRelocationIfNeeded(prev, target, dragX);
-            showCurrentTrackImage();
-            hideImagePeer(false);
-            float enterX = dragX + dir * width;
-            coverView.setTranslationX(enterX);
-            long enterDuration = Math.max(90, (long) (200 * Math.abs(enterX) / width));
-            coverView.animate().translationX(0f).setDuration(enterDuration)
-                    .setInterpolator(new android.view.animation.DecelerateInterpolator())
-                    .withEndAction(() -> {
-                        if (gen == imageAnimGeneration) {
-                            imageSwitching = false;
-                        }
-                    }).start();
+
+        // 回到封面：顶部小图立刻淡出（它要显示的正是这张封面）
+        if (prev > 0 && target == 0) {
+            fadeOutCoverThumb();
+        }
+
+        if (!ensurePeerForTarget(item, target, dir)) {
+            fallbackImageSettle(dir, target, width, gen);
             return;
         }
-        if (prev > 0 && target == 0 && cover != null) {
-            // 回到封面：旧图先滑出屏幕，结束后封面从缩略图飞向大图位置，
-            // 落地后才显示 coverView，避免进场的封面与飞行的封面重叠
-            hideImagePeer(false);
-            currentImageIndex = target;
-            coverView.animate().translationX(outX).setDuration(outDuration).withEndAction(() -> {
-                if (gen != imageAnimGeneration) {
-                    return;
-                }
-                animateCoverRelocationIfNeeded(prev, target, 0f);
-                coverView.setTranslationX(0f);
-                coverView.setAlpha(0f);
-                showCurrentTrackImage();
-                handler.postDelayed(() -> {
+
+        float outX = -dir * width;
+        // 新图起点 = 当前图的拖动位置再往旁边挪一个图宽（与拖动时预览层一致）
+        float peerFromX = imagePeerBaseX + coverView.getTranslationX() + dir * width;
+        imagePeerView.setTranslationX(peerFromX);
+        imagePeerView.setVisibility(View.VISIBLE);
+        imagePeerView.bringToFront();
+        float remain = Math.abs(peerFromX - imagePeerBaseX);
+        if (remain < 1f) {
+            remain = width;
+        }
+        long duration = settleDuration(remain, width, velocityX);
+
+        coverView.animate().cancel();
+        imagePeerView.animate().cancel();
+        coverView.animate().translationX(outX).setDuration(duration)
+                .setInterpolator(new android.view.animation.DecelerateInterpolator())
+                .start();
+        imagePeerView.animate().translationX(imagePeerBaseX).setDuration(duration)
+                .setInterpolator(new android.view.animation.DecelerateInterpolator())
+                .withEndAction(() -> {
                     if (gen == imageAnimGeneration) {
-                        coverView.setAlpha(1f);
+                        finishImageSwitch(target);
+                    }
+                }).start();
+    }
+
+    /** 准备 peer 层承载目标图（不负责显隐与位置）；coverView 尚未布局时返回 false。 */
+    private boolean ensurePeerForTarget(MediaItem item, int target, int dir) {
+        if (imagePeerView == null || coverView.getWidth() <= 0) {
+            return false;
+        }
+        ensurePeerBase();
+        imagePeerSide = dir;
+        imagePeerIndex = target;
+        imagePeerView.animate().cancel();
+        bindPeerImage(item.images.get(target));
+        return true;
+    }
+
+    /** 按剩余距离与手指速度决定时长，避免松手瞬间速度突变。 */
+    private long settleDuration(float remain, float width, float velocityX) {
+        float speed = Math.abs(velocityX);
+        long duration;
+        if (speed > dp(300)) {
+            duration = (long) (remain / speed * 1000f);
+        } else {
+            duration = (long) (250f * remain / Math.max(1f, width));
+        }
+        return Math.max(140, Math.min(300, duration));
+    }
+
+    /**
+     * 交接：coverView 归位并换成目标图，peer 在同一位置显示同一张图后隐藏。
+     * 两者内容与位置完全一致，隐藏 peer 不会有任何视觉跳变。
+     */
+    private void finishImageSwitch(int target) {
+        coverView.animate().cancel();
+        if (imagePeerView != null) {
+            imagePeerView.animate().cancel();
+        }
+        currentImageIndex = target;
+        imageSettleTarget = -1;
+        coverView.setTranslationX(0f);
+        coverView.setAlpha(1f);
+        // 先把 coverView 换成目标图（与 peer 同内容、同位），再隐藏 peer，
+        // 任何一帧都不会出现「peer 没了而 coverView 还是旧图」的画面
+        showCurrentTrackImage(true);
+        if (imagePeerView != null) {
+            imagePeerView.setVisibility(View.GONE);
+            imagePeerView.setTranslationX(imagePeerBaseX);
+        }
+        imagePeerIndex = -1;
+        imagePeerSide = 0;
+        pendingPeerImageKey = null;
+        imageSwitching = false;
+    }
+
+    /** coverView 还没布局时的兜底：退化成单图进出场。 */
+    private void fallbackImageSettle(int dir, int target, float width, int gen) {
+        currentImageIndex = target;
+        imageSettleTarget = -1;
+        showCurrentTrackImage();
+        coverView.setTranslationX(dir * width);
+        coverView.animate().translationX(0f).setDuration(200)
+                .setInterpolator(new android.view.animation.DecelerateInterpolator())
+                .withEndAction(() -> {
+                    if (gen == imageAnimGeneration) {
                         imageSwitching = false;
                     }
-                }, 320);
-            }).start();
+                }).start();
+    }
+
+    /** 顶部封面小图淡出：回到封面时它不再需要，避免同一张封面同时出现在两处。 */
+    private void fadeOutCoverThumb() {
+        if (coverTopThumb == null || coverTopThumb.getVisibility() != View.VISIBLE) {
             return;
         }
-        // 普通图片间切换：新图已由预览层显示在相邻位置，旧图滑出后
-        // coverView 直接接管预览位置继续滑入，避免从全宽外进场造成割裂
-        coverView.animate().translationX(outX).setDuration(outDuration).withEndAction(() -> {
-            if (gen != imageAnimGeneration) {
-                return;
-            }
-            currentImageIndex = target;
-            showCurrentTrackImage();
-            hideImagePeer(false);
-            float enterX = startX + dir * width;
-            coverView.setTranslationX(enterX);
-            long enterDuration = Math.max(90, (long) (200 * Math.abs(enterX) / width));
-            coverView.animate().translationX(0f).setDuration(enterDuration)
-                    .setInterpolator(new android.view.animation.DecelerateInterpolator())
-                    .withEndAction(() -> {
-                        if (gen == imageAnimGeneration) {
-                            imageSwitching = false;
-                        }
-                    }).start();
-        }).start();
+        coverTopThumb.animate().cancel();
+        coverTopThumb.animate().alpha(0f).setDuration(170)
+                .withEndAction(() -> {
+                    coverTopThumb.setVisibility(View.GONE);
+                    coverTopThumb.setAlpha(1f);
+                }).start();
     }
 
     private void springImageBack() {
         imageAnimGeneration++;
         final int gen = imageAnimGeneration;
+        imageSettleTarget = -1;
         imageSwitching = true;
-        // 预览层跟随封面一起弹回原位
         if (imagePeerView != null && imagePeerView.getVisibility() == View.VISIBLE) {
             ImageView peer = imagePeerView;
             int side = imagePeerSide == -1 ? -1 : 1;
+            peer.animate().cancel();
             peer.animate().translationX(imagePeerBaseX + side * coverView.getWidth())
-                    .setDuration(180)
-                    .withEndAction(() -> peer.setVisibility(View.GONE))
-                    .start();
+                    .setDuration(190)
+                    .withEndAction(() -> {
+                        if (peer.getVisibility() == View.VISIBLE) {
+                            peer.setVisibility(View.GONE);
+                        }
+                    }).start();
             imagePeerSide = 0;
             imagePeerIndex = -1;
+            pendingPeerImageKey = null;
         }
-        coverView.animate().translationX(0f).setDuration(180).withEndAction(() -> {
+        coverView.animate().cancel();
+        coverView.animate().translationX(0f).setDuration(190).withEndAction(() -> {
             if (gen == imageAnimGeneration) {
                 imageSwitching = false;
             }
@@ -4056,11 +4027,20 @@ public class MainActivity extends Activity {
         if (pageMode != PAGE_PLAYER || item == null || item.images.size() <= 1 || imageDragging) {
             return;
         }
+        // 连点「上一张/下一张」时把上一次动画直接收尾，避免两次动画叠加
+        if (imageSwitching) {
+            if (imageSettleTarget >= 0 && imageSettleTarget != currentImageIndex) {
+                finishImageSwitch(imageSettleTarget);
+            } else {
+                coverView.animate().cancel();
+                imageSwitching = false;
+            }
+        }
         int target = currentImageIndex + direction;
         if (target < 0 || target >= item.images.size()) {
             return;
         }
-        beginImageSettle(direction, target);
+        beginImageSettle(direction, target, 0f);
     }
 
     private Button miniIndicatorButton(String text, int direction) {
